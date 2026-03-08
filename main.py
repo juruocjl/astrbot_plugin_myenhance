@@ -52,7 +52,7 @@ class MyPlugin(Star):
             len(self.active_reply_whitelist),
         )
 
-        self.group_histories: dict[str, Deque[str]] = defaultdict(
+        self.group_histories: dict[str, Deque[tuple[float, str]]] = defaultdict(
             lambda: deque(maxlen=self.max_history)
         )
         self.group_history_locks: dict[str, asyncio.Lock] = {}
@@ -84,12 +84,21 @@ class MyPlugin(Star):
             self.group_history_locks[group_id] = lock
         return lock
 
-    async def _record_line(self, group_id: str, line: str) -> None:
+    def _get_event_timestamp(self, event: AstrMessageEvent) -> float:
+        timestamp = getattr(event.message_obj, "timestamp", None)
+        try:
+            if timestamp is None:
+                return datetime.now().timestamp()
+            return float(timestamp)
+        except (TypeError, ValueError):
+            return datetime.now().timestamp()
+
+    async def _record_line(self, group_id: str, event_ts: float, line: str) -> None:
         if not group_id:
             return
         lock = self._get_group_lock(group_id)
         async with lock:
-            self.group_histories[group_id].append(line)
+            self.group_histories[group_id].append((event_ts, line))
 
     def _format_member_message(self, event: AstrMessageEvent) -> str:
         nickname = event.get_sender_name() or "unknown"
@@ -188,8 +197,9 @@ class MyPlugin(Star):
             return
 
         line = self._format_member_message(event)
+        event_ts = self._get_event_timestamp(event)
 
-        await self._record_line(group_id, line)
+        await self._record_line(group_id, event_ts, line)
 
         if not self._should_active_reply(event):
             return
@@ -246,9 +256,23 @@ class MyPlugin(Star):
             history = self.group_histories.get(group_id)
             if not history:
                 return
-            history_text = "\n\n".join(history)
-            history_count = len(history)
-            history.clear()
+
+            current_event_ts = self._get_event_timestamp(event)
+            pop_lines: list[str] = []
+            remaining: Deque[tuple[float, str]] = deque(maxlen=self.max_history)
+
+            for item_ts, item_line in history:
+                if item_ts <= current_event_ts:
+                    pop_lines.append(item_line)
+                    continue
+                remaining.append((item_ts, item_line))
+
+            if not pop_lines:
+                return
+
+            history_text = "\n\n".join(pop_lines)
+            history_count = len(pop_lines)
+            self.group_histories[group_id] = remaining
 
         original_prompt = req.prompt or ""
         if original_prompt:
@@ -261,7 +285,7 @@ class MyPlugin(Star):
             req.prompt = history_text
 
         logger.info(
-            "[myenhance] injected %s history records into prompt for group %s and cleared queue",
+            "[myenhance] injected %s history records into prompt for group %s and popped only records older than current event timestamp",
             history_count,
             group_id,
         )
