@@ -2,17 +2,23 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import datetime
+import re
 from typing import Deque
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType
+from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.1")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.2")
 class MyPlugin(Star):
+    QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
+    MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
+    REFUSE_ONLY_RE = re.compile(r'^\s*<refuse\s*/>\s*$')
+
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
@@ -26,6 +32,19 @@ class MyPlugin(Star):
 
         self.group_histories: dict[str, Deque[str]] = defaultdict(
             lambda: deque(maxlen=self.max_history)
+        )
+
+        self.reply_system_prompt_cn = (
+            "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。\n\n"
+            "请优先引用要回复的消息。若可从上下文中确定目标消息 ID，使用 <quote id=\"msg_id\"/> 并且必须放在输出最开头。\n"
+            "每次只能引用一条消息。\n\n"
+            "当需要提及用户时，使用 <mention id=\"user_id\"/>，可提及多个用户。\n"
+            "user_id 可从消息格式 [nickname/user_id/time] 中提取。\n"
+            "mention 不是容器标签，绝对不要输出 </mention>。\n\n"
+            "quote 不是容器标签，绝对不要输出 </quote>。\n"
+            "若无法或不应回复，完整输出 <refuse/>，且前后不得有任何其他字符。\n\n"
+            "语言要求：始终使用聊天室当前主要语言回复。\n"
+            "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。"
         )
 
     def _format_time(self, timestamp: int | float | None = None) -> str:
@@ -48,9 +67,45 @@ class MyPlugin(Star):
         msg_id = getattr(event.message_obj, "message_id", None) or "unknown"
         text = (event.message_str or "").strip()
         return (
-            f"群友消息 [{nickname}/{sender_id}/{self._format_time(timestamp)}] "
+            f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] "
             f"({role})#msg{msg_id}\n{text}"
         )
+
+    def _parse_control_tags_to_chain(self, text: str) -> MessageChain | None:
+        """将模型输出中的控制标签解析为消息链组件。"""
+        if not text:
+            return None
+
+        match = self.QUOTE_HEAD_RE.match(text)
+        quote_id = match.group(1).strip() if match else ""
+        body = text[match.end() :] if match else text
+        touched = bool(match)
+        chain: list = []
+
+        if quote_id:
+            chain.append(Reply(id=quote_id))
+
+        cursor = 0
+        for m in self.MENTION_RE.finditer(body):
+            touched = True
+            if m.start() > cursor:
+                plain = body[cursor : m.start()]
+                if plain:
+                    chain.append(Plain(plain))
+            mention_id = m.group(1).strip()
+            if mention_id:
+                chain.append(At(qq=mention_id, name=""))
+            cursor = m.end()
+
+        if cursor < len(body):
+            tail = body[cursor:]
+            if tail:
+                chain.append(Plain(tail))
+
+        if not touched:
+            return None
+
+        return MessageChain(chain=chain)
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
@@ -73,6 +128,11 @@ class MyPlugin(Star):
         req: ProviderRequest,
     ):
         """在 LLM 请求前，把群内已记录消息拼接到 req.prompt。"""
+        if req.system_prompt:
+            req.system_prompt = f"{req.system_prompt}\n\n{self.reply_system_prompt_cn}"
+        else:
+            req.system_prompt = self.reply_system_prompt_cn
+
         group_id = event.get_group_id()
         if not group_id:
             return
@@ -96,3 +156,29 @@ class MyPlugin(Star):
             len(history),
             group_id,
         )
+
+    @filter.on_decorating_result()
+    async def parse_control_tags_in_decorating_result(self, event: AstrMessageEvent):
+        """发送前把输出文本中的 quote/mention 标签解析为真实消息链。"""
+        result = event.get_result()
+        if not result or not result.chain:
+            return
+
+        # 仅处理纯文本结果，避免覆盖插件/平台已构造好的非文本消息段。
+        if any(not isinstance(comp, Plain) for comp in result.chain):
+            return
+
+        text = "".join(comp.text for comp in result.chain if isinstance(comp, Plain))
+
+        if self.REFUSE_ONLY_RE.match(text):
+            result.chain = []
+            event.stop_event()
+            logger.info("[myenhance] got <refuse/>, suppress outgoing message")
+            return
+
+        parsed_chain = self._parse_control_tags_to_chain(text)
+        if not parsed_chain:
+            return
+
+        result.chain = parsed_chain.chain
+        logger.info("[myenhance] parsed control tags into chain in on_decorating_result")
