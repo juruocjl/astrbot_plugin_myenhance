@@ -134,7 +134,7 @@ class MyPlugin(Star):
         if event.get_sender_id() == event.get_self_id():
             logger.debug("[myenhance] active_reply skipped: self message")
             return False
-        if event.is_at_or_wake_command or event.is_wake_up():
+        if event.is_at_or_wake_command:
             logger.debug("[myenhance] active_reply skipped: wake/at command message")
             return False
 
