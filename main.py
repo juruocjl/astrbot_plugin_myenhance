@@ -138,7 +138,14 @@ class MyPlugin(Star):
         if not text:
             return False
 
-        return random.random() < self.active_reply_probability
+        roll = random.random()
+        logger.info(
+            "[myenhance] active_reply roll=%.6f threshold=%.6f group=%s",
+            roll,
+            self.active_reply_probability,
+            group_id,
+        )
+        return roll < self.active_reply_probability
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
