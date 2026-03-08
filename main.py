@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict, deque
 from datetime import datetime
 import random
@@ -14,7 +15,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.3")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.4")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -54,6 +55,7 @@ class MyPlugin(Star):
         self.group_histories: dict[str, Deque[str]] = defaultdict(
             lambda: deque(maxlen=self.max_history)
         )
+        self.group_history_locks: dict[str, asyncio.Lock] = {}
 
         self.reply_system_prompt_cn = (
             "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。\n\n"
@@ -75,10 +77,19 @@ class MyPlugin(Star):
             dt = datetime.fromtimestamp(timestamp)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    def _record_line(self, group_id: str, line: str) -> None:
+    def _get_group_lock(self, group_id: str) -> asyncio.Lock:
+        lock = self.group_history_locks.get(group_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.group_history_locks[group_id] = lock
+        return lock
+
+    async def _record_line(self, group_id: str, line: str) -> None:
         if not group_id:
             return
-        self.group_histories[group_id].append(line)
+        lock = self._get_group_lock(group_id)
+        async with lock:
+            self.group_histories[group_id].append(line)
 
     def _format_member_message(self, event: AstrMessageEvent) -> str:
         nickname = event.get_sender_name() or "unknown"
@@ -178,7 +189,7 @@ class MyPlugin(Star):
 
         line = self._format_member_message(event)
 
-        self._record_line(group_id, line)
+        await self._record_line(group_id, line)
 
         if not self._should_active_reply(event):
             return
@@ -230,11 +241,15 @@ class MyPlugin(Star):
         if not group_id:
             return
 
-        history = self.group_histories.get(group_id)
-        if not history:
-            return
+        lock = self._get_group_lock(group_id)
+        async with lock:
+            history = self.group_histories.get(group_id)
+            if not history:
+                return
+            history_text = "\n\n".join(history)
+            history_count = len(history)
+            history.clear()
 
-        history_text = "\n\n".join(history)
         original_prompt = req.prompt or ""
         if original_prompt:
             req.prompt = (
@@ -244,9 +259,10 @@ class MyPlugin(Star):
             )
         else:
             req.prompt = history_text
+
         logger.info(
-            "[myenhance] injected %s history records into prompt for group %s",
-            len(history),
+            "[myenhance] injected %s history records into prompt for group %s and cleared queue",
+            history_count,
             group_id,
         )
 
