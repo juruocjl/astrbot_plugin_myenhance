@@ -44,6 +44,13 @@ class MyPlugin(Star):
         else:
             self.active_reply_whitelist = set()
 
+        logger.debug(
+            "[myenhance] active_reply config: enable=%s probability=%.6f whitelist_size=%s",
+            self.active_reply_enable,
+            self.active_reply_probability,
+            len(self.active_reply_whitelist),
+        )
+
         self.group_histories: dict[str, Deque[str]] = defaultdict(
             lambda: deque(maxlen=self.max_history)
         )
@@ -122,30 +129,42 @@ class MyPlugin(Star):
 
     def _should_active_reply(self, event: AstrMessageEvent) -> bool:
         if not self.active_reply_enable:
+            logger.debug("[myenhance] active_reply skipped: feature disabled")
             return False
         if event.get_sender_id() == event.get_self_id():
+            logger.debug("[myenhance] active_reply skipped: self message")
             return False
         if event.is_at_or_wake_command or event.is_wake_up():
+            logger.debug("[myenhance] active_reply skipped: wake/at command message")
             return False
 
         group_id = event.get_group_id()
         if not group_id:
+            logger.debug("[myenhance] active_reply skipped: non-group message")
             return False
         if self.active_reply_whitelist and group_id not in self.active_reply_whitelist:
+            logger.debug(
+                "[myenhance] active_reply skipped: group %s not in whitelist",
+                group_id,
+            )
             return False
 
         text = (event.message_str or "").strip()
         if not text:
+            logger.debug("[myenhance] active_reply skipped: empty text")
             return False
 
         roll = random.random()
-        logger.info(
+        logger.debug(
             "[myenhance] active_reply roll=%.6f threshold=%.6f group=%s",
             roll,
             self.active_reply_probability,
             group_id,
         )
-        return roll < self.active_reply_probability
+        if roll >= self.active_reply_probability:
+            logger.debug("[myenhance] active_reply skipped: roll not hit")
+            return False
+        return True
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
