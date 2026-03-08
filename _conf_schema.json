@@ -1,0 +1,7 @@
+{
+  "max_history": {
+    "description": "每个群保留的消息记录条数",
+    "type": "int",
+    "default": 300
+  }
+}
