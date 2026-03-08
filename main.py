@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import datetime
+import random
 import re
 from typing import Deque
 
@@ -13,7 +14,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.2")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.3")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -29,6 +30,19 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             parsed = 300
         self.max_history = max(1, parsed)
+
+        self.active_reply_enable = bool(self.config.get("active_reply_enable", False))
+        raw_probability = self.config.get("active_reply_probability", 0.1)
+        try:
+            parsed_probability = float(raw_probability)
+        except (TypeError, ValueError):
+            parsed_probability = 0.1
+        self.active_reply_probability = min(max(parsed_probability, 0.0), 1.0)
+        raw_whitelist = self.config.get("active_reply_whitelist", [])
+        if isinstance(raw_whitelist, list):
+            self.active_reply_whitelist = {str(i) for i in raw_whitelist if str(i).strip()}
+        else:
+            self.active_reply_whitelist = set()
 
         self.group_histories: dict[str, Deque[str]] = defaultdict(
             lambda: deque(maxlen=self.max_history)
@@ -67,8 +81,7 @@ class MyPlugin(Star):
         msg_id = getattr(event.message_obj, "message_id", None) or "unknown"
         text = (event.message_str or "").strip()
         return (
-            f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] "
-            f"({role})#msg{msg_id}\n{text}"
+            f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
         )
 
     def _parse_control_tags_to_chain(self, text: str) -> MessageChain | None:
@@ -107,9 +120,29 @@ class MyPlugin(Star):
 
         return MessageChain(chain=chain)
 
+    def _should_active_reply(self, event: AstrMessageEvent) -> bool:
+        if not self.active_reply_enable:
+            return False
+        if event.get_sender_id() == event.get_self_id():
+            return False
+        if event.is_at_or_wake_command or event.is_wake_up():
+            return False
+
+        group_id = event.get_group_id()
+        if not group_id:
+            return False
+        if self.active_reply_whitelist and group_id not in self.active_reply_whitelist:
+            return False
+
+        text = (event.message_str or "").strip()
+        if not text:
+            return False
+
+        return random.random() < self.active_reply_probability
+
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
-        """记录群友消息。"""
+        """记录群友消息，并按概率触发主动回复。"""
         group_id = event.get_group_id()
         if not group_id:
             return
@@ -120,6 +153,40 @@ class MyPlugin(Star):
         line = self._format_member_message(event)
 
         self._record_line(group_id, line)
+
+        if not self._should_active_reply(event):
+            return
+
+        provider = self.context.get_using_provider(event.unified_msg_origin)
+        if not provider:
+            logger.error("[myenhance] active_reply: no provider found")
+            return
+
+        session_curr_cid = await self.context.conversation_manager.get_curr_conversation_id(
+            event.unified_msg_origin,
+        )
+        if not session_curr_cid:
+            logger.info("[myenhance] active_reply skipped: no active conversation")
+            return
+
+        conv = await self.context.conversation_manager.get_conversation(
+            event.unified_msg_origin,
+            session_curr_cid,
+        )
+        if not conv:
+            logger.info("[myenhance] active_reply skipped: conversation not found")
+            return
+
+        logger.info(
+            "[myenhance] active_reply triggered: group=%s probability=%.3f",
+            group_id,
+            self.active_reply_probability,
+        )
+        yield event.request_llm(
+            prompt=event.message_str,
+            session_id=event.session_id,
+            conversation=conv,
+        )
 
     @filter.on_llm_request()
     async def inject_group_history_to_prompt(
