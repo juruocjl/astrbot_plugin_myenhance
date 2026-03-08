@@ -3,5 +3,20 @@
     "description": "每个群保留的消息记录条数",
     "type": "int",
     "default": 300
+  },
+  "active_reply_enable": {
+    "description": "是否启用概率主动回复",
+    "type": "bool",
+    "default": false
+  },
+  "active_reply_probability": {
+    "description": "主动回复触发概率，范围 0.0-1.0",
+    "type": "float",
+    "default": 0.1
+  },
+  "active_reply_whitelist": {
+    "description": "主动回复白名单群号（留空表示所有群）",
+    "type": "list",
+    "default": []
   }
 }
