@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.5")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.6")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -105,7 +105,19 @@ class MyPlugin(Star):
             "mention 不是容器标签，绝对不要输出 </mention>。\n\n"
             "quote 不是容器标签，绝对不要输出 </quote>。\n"
             "若无法或不应回复，完整输出 <refuse/>，且前后不得有任何其他字符。\n\n"
-            "当要回复的消息包含 [image] 或 [image,summary=...] 时，先调用工具 describe_image。\n"
+            "上下文中的每条消息记录格式为：\n"
+            "[nickname/user_id/time] (role)#msg消息ID\\n消息内容\n"
+            "其中 role 可能是 admin 或 member。\n\n"
+            "消息内容中的消息段占位符说明：\n"
+            "纯文本: 直接显示原文；\n"
+            "图片: [image]；\n"
+            "表情: [face:描述或id]；\n"
+            "@用户: [at:昵称/qq]；\n"
+            "@全体: [at:全体成员]；\n"
+            "转发: [forward]；\n"
+            "引用: [reply] 或 [reply:消息id,昵称/用户id]；\n"
+            "其他类型: [type]。\n\n"
+            "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
             "工具参数规则：msgid 使用目标消息的编号（即 #msg 后面的 message_id），image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
             "语言要求：始终使用聊天室当前主要语言回复。\n"
