@@ -18,5 +18,25 @@
     "description": "主动回复白名单群号（留空表示所有群）",
     "type": "list",
     "default": []
+  },
+  "cached_size": {
+    "description": "cached 保留最近多少条消息（按会话）",
+    "type": "int",
+    "default": 120
+  },
+  "describe_image_provider_id": {
+    "description": "describe_image 使用的 provider_id，留空则使用当前会话 provider",
+    "type": "string",
+    "default": ""
+  },
+  "describe_image_ask": {
+    "description": "describe_image 调用模型时使用的提示词",
+    "type": "string",
+    "default": "请客观描述这张图片中的主要内容，简洁一些。"
+  },
+  "image_url_cache_size": {
+    "description": "图片 URL 的 LRU 缓存容量（保留最近多少张图片的描述结果）",
+    "type": "int",
+    "default": 120
   }
 }
