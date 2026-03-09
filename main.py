@@ -16,10 +16,11 @@ from astrbot.api.event.filter import EventMessageType
 from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.1")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -89,7 +90,9 @@ class MyPlugin(Star):
         )
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
-        self.cache_state_file = Path(__file__).with_name(".myenhance_cache_state.json")
+        plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
+        plugin_data_path.mkdir(parents=True, exist_ok=True)
+        self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
         self._load_cache_state()
 
         self.reply_system_prompt_cn = (
