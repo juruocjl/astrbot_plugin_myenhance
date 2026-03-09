@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.1")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.2")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -138,6 +138,7 @@ class MyPlugin(Star):
         """Normalize incoming message content for prompt/history rendering.
 
         For image segments, render as "[image]" or "[image,summary=...]".
+        For reply segments, render as "[reply,id=...]".
         """
         messages = event.get_messages() or []
         if not messages:
@@ -153,9 +154,31 @@ class MyPlugin(Star):
                     rendered_parts.append(text)
                 continue
 
+            if isinstance(comp, Reply):
+                reply_id = str(getattr(comp, "id", "") or "").strip()
+                if reply_id:
+                    rendered_parts.append(f"[reply,id={reply_id}]")
+                else:
+                    rendered_parts.append("[reply]")
+                continue
+
             comp_type = str(getattr(comp, "type", "")).lower()
             if isinstance(comp, dict):
                 comp_type = str(comp.get("type", "")).lower()
+
+            if comp_type == "reply" or comp_type.endswith(".reply"):
+                reply_id = ""
+                if isinstance(comp, dict):
+                    data = comp.get("data", {})
+                    if isinstance(data, dict):
+                        reply_id = str(
+                            data.get("id") or data.get("message_id") or ""
+                        ).strip()
+                if reply_id:
+                    rendered_parts.append(f"[reply,id={reply_id}]")
+                else:
+                    rendered_parts.append("[reply]")
+                continue
 
             if comp_type == "image" or comp_type.endswith(".image"):
                 has_image = True
