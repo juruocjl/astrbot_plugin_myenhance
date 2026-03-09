@@ -15,7 +15,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.4")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.1.5")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -93,6 +93,49 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             return datetime.now().timestamp()
 
+    def _normalize_message_text(self, event: AstrMessageEvent) -> str:
+        """Normalize incoming message content for prompt/history rendering.
+
+        For image segments, render as "[image]" or "[image,summary=...]".
+        """
+        messages = event.get_messages() or []
+        if not messages:
+            return (event.message_str or "").strip()
+
+        has_image = False
+        rendered_parts: list[str] = []
+
+        for comp in messages:
+            if isinstance(comp, Plain):
+                text = (comp.text or "").strip()
+                if text:
+                    rendered_parts.append(text)
+                continue
+
+            comp_type = str(getattr(comp, "type", "")).lower()
+            if isinstance(comp, dict):
+                comp_type = str(comp.get("type", "")).lower()
+
+            if comp_type == "image" or comp_type.endswith(".image"):
+                has_image = True
+                summary = getattr(comp, "summary", None)
+                if summary is None:
+                    summary = getattr(comp, "alt", None)
+                if summary is None and isinstance(comp, dict):
+                    data = comp.get("data", {})
+                    if isinstance(data, dict):
+                        summary = data.get("summary") or data.get("alt")
+                summary_text = "" if summary is None else str(summary).strip()
+                if summary_text:
+                    rendered_parts.append(f"[image,summary={summary_text}]")
+                else:
+                    rendered_parts.append("[image]")
+
+        if has_image:
+            return " ".join(rendered_parts).strip() or "[image]"
+
+        return (event.message_str or "").strip()
+
     async def _record_line(self, group_id: str, event_ts: float, line: str) -> None:
         if not group_id:
             return
@@ -106,7 +149,7 @@ class MyPlugin(Star):
         role = "admin" if event.is_admin() else "member"
         timestamp = getattr(event.message_obj, "timestamp", None)
         msg_id = getattr(event.message_obj, "message_id", None) or "unknown"
-        text = (event.message_str or "").strip()
+        text = self._normalize_message_text(event)
         return (
             f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
         )
@@ -169,7 +212,7 @@ class MyPlugin(Star):
             )
             return False
 
-        text = (event.message_str or "").strip()
+        text = self._normalize_message_text(event)
         if not text:
             logger.debug("[myenhance] active_reply skipped: empty text")
             return False
@@ -229,8 +272,9 @@ class MyPlugin(Star):
             group_id,
             self.active_reply_probability,
         )
+        normalized_prompt = self._normalize_message_text(event)
         yield event.request_llm(
-            prompt=event.message_str,
+            prompt=normalized_prompt,
             session_id=event.session_id,
             conversation=conv,
         )
@@ -274,7 +318,9 @@ class MyPlugin(Star):
             history_count = len(pop_lines)
             self.group_histories[group_id] = remaining
 
-        original_prompt = req.prompt or ""
+        original_prompt = (req.prompt or "").strip()
+        if not original_prompt:
+            original_prompt = self._normalize_message_text(event)
         if original_prompt:
             req.prompt = (
                 f"{history_text}\n\n"
