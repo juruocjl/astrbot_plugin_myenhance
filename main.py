@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.4")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.5")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -90,6 +90,7 @@ class MyPlugin(Star):
         )
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
+        self.face_desc_map = self._load_face_desc_map()
         plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         plugin_data_path.mkdir(parents=True, exist_ok=True)
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
@@ -134,6 +135,37 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             return datetime.now().timestamp()
 
+    def _load_face_desc_map(self) -> dict[str, str]:
+        data_file = Path(__file__).with_name("assets") / "data.json"
+        mapping: dict[str, str] = {}
+        if not data_file.exists():
+            return mapping
+
+        try:
+            raw = json.loads(data_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("[myenhance] failed to load face data map: %s", e)
+            return mapping
+
+        if not isinstance(raw, list):
+            return mapping
+
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            desc = str(item.get("describe") or item.get("QDes") or "").strip()
+            if not desc:
+                continue
+
+            value = item.get("emojiId")
+            if value is None:
+                value = item.get("QSid")
+            key = str(value).strip() if value is not None else ""
+            if key and key not in mapping:
+                mapping[key] = desc
+
+        return mapping
+
     def _normalize_message_text(self, event: AstrMessageEvent) -> str:
         """Normalize message chain using concise outline placeholders."""
         messages = event.get_messages() or []
@@ -148,7 +180,12 @@ class MyPlugin(Star):
             elif isinstance(comp, Image):
                 rendered_parts.append("[image]")
             elif isinstance(comp, Face):
-                rendered_parts.append(f"[face:{comp.id}]")
+                face_id = str(getattr(comp, "id", "") or "").strip()
+                face_desc = self.face_desc_map.get(face_id)
+                if face_desc:
+                    rendered_parts.append(f"[face:{face_desc}]")
+                else:
+                    rendered_parts.append(f"[face:{face_id}]")
             elif isinstance(comp, At):
                 rendered_parts.append(f"[at:{comp.name}/{comp.qq}]")
             elif isinstance(comp, AtAll):
