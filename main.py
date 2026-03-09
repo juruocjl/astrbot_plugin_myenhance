@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.3")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.4")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -157,7 +157,7 @@ class MyPlugin(Star):
                 rendered_parts.append("[forward]")
             elif isinstance(comp, Reply):
                 if getattr(comp, "id", ""):
-                    rendered_parts.append(f"[reply:{comp.id},{comp.sender_name}/{comp.sender_id}]")
+                    rendered_parts.append(f"[reply:{comp.id},{comp.sender_nickname}/{comp.sender_id}]")
                 else:
                     rendered_parts.append("[reply]")
             else:
