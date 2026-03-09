@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.2")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -101,6 +101,9 @@ class MyPlugin(Star):
             "mention 不是容器标签，绝对不要输出 </mention>。\n\n"
             "quote 不是容器标签，绝对不要输出 </quote>。\n"
             "若无法或不应回复，完整输出 <refuse/>，且前后不得有任何其他字符。\n\n"
+            "当要回复的消息包含 [image] 或 [image,summary=...] 时，先调用工具 describe_image。\n"
+            "工具参数规则：msgid 使用目标消息的编号（即 #msg 后面的 message_id），image_index 从 1 开始。\n"
+            "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
             "语言要求：始终使用聊天室当前主要语言回复。\n"
             "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。"
         )

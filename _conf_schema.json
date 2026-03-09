@@ -27,6 +27,7 @@
   "describe_image_provider_id": {
     "description": "describe_image 使用的 provider_id，留空则使用当前会话 provider",
     "type": "string",
+    "_special": "select_provider",
     "default": ""
   },
   "describe_image_ask": {
