@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.7")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.8")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -478,6 +478,10 @@ class MyPlugin(Star):
         return text
 
     def _format_member_message(self, event: AstrMessageEvent) -> str:
+        poke_text = self._format_poke_message(event)
+        if poke_text:
+            return poke_text
+
         nickname = event.get_sender_name() or "unknown"
         sender_id = event.get_sender_id() or "unknown"
         role = "admin" if event.is_admin() else "member"
@@ -487,6 +491,21 @@ class MyPlugin(Star):
         return (
             f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
         )
+
+    def _format_poke_message(self, event: AstrMessageEvent) -> str | None:
+        raw_message = getattr(event.message_obj, "raw_message", None)
+        if not isinstance(raw_message, dict):
+            return None
+
+        if str(raw_message.get("notice_type") or "") != "notify":
+            return None
+        if str(raw_message.get("sub_type") or "") != "poke":
+            return None
+
+        user_id = str(raw_message.get("user_id") or event.get_sender_id() or "unknown")
+        target_id = str(raw_message.get("target_id") or "unknown")
+        ts = raw_message.get("time") or getattr(event.message_obj, "timestamp", None)
+        return f"[戳一戳/{self._format_time(ts)}]\n{user_id} 戳了戳 {target_id}"
 
     def _get_bot_id(self, event: AstrMessageEvent) -> str:
         return str(event.get_self_id() or "unknown").strip() or "unknown"
