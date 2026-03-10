@@ -13,14 +13,14 @@ import uuid
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType
-from astrbot.api.message_components import At, AtAll, Face, Forward, Image, Plain, Reply
+from astrbot.api.message_components import At, AtAll, Face, Forward, Image, Plain, Reply, Json
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.8")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.9")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -191,6 +191,15 @@ class MyPlugin(Star):
                 rendered_parts.append(comp.text)
             elif isinstance(comp, Image):
                 rendered_parts.append("[image]")
+            elif isinstance(comp, Json):
+                payload = getattr(comp, "data", None)
+                prompt = ""
+                if isinstance(payload, dict):
+                    prompt = str(payload.get("prompt") or "").strip()
+                if prompt:
+                    rendered_parts.append(f"[Json:{prompt}]")
+                else:
+                    rendered_parts.append("[Json]")
             elif isinstance(comp, Face):
                 face_id = str(getattr(comp, "id", "") or "").strip()
                 face_desc = self.face_desc_map.get(face_id)
@@ -563,6 +572,9 @@ class MyPlugin(Star):
     def _should_active_reply(self, event: AstrMessageEvent) -> bool:
         if not self.active_reply_enable:
             logger.debug("[myenhance] active_reply skipped: feature disabled")
+            return False
+        if self._format_poke_message(event):
+            logger.debug("[myenhance] active_reply skipped: poke event")
             return False
         if event.get_sender_id() == event.get_self_id():
             logger.debug("[myenhance] active_reply skipped: self message")
