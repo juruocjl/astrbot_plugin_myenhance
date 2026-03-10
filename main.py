@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.6")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.7")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -488,6 +488,23 @@ class MyPlugin(Star):
             f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
         )
 
+    def _get_bot_id(self, event: AstrMessageEvent) -> str:
+        return str(event.get_self_id() or "unknown").strip() or "unknown"
+
+    def _dump_for_log(self, obj) -> str:
+        try:
+            if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+                payload = obj.model_dump()
+            elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+                payload = obj.dict()
+            elif hasattr(obj, "__dict__"):
+                payload = vars(obj)
+            else:
+                payload = str(obj)
+            return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            return repr(obj)
+
     def _parse_control_tags_to_chain(self, text: str) -> MessageChain | None:
         """将模型输出中的控制标签解析为消息链组件。"""
         if not text:
@@ -565,6 +582,8 @@ class MyPlugin(Star):
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
+        logger.debug("[myenhance] message_obj detail:\n%s", self._dump_for_log(event.message_obj))
+        
         """记录群友消息，并按概率触发主动回复。"""
         group_id = event.get_group_id()
         if not group_id:
@@ -659,8 +678,10 @@ class MyPlugin(Star):
         if not original_prompt:
             original_prompt = self._normalize_message_text(event)
         if original_prompt:
+            bot_id = self._get_bot_id(event)
             req.prompt = (
                 f"{history_text}\n\n"
+                f"你的id是{bot_id}。\n"
                 f"请回复下面这条消息（#msg{getattr(event.message_obj, 'message_id', 'unknown')}）:\n"
                 f"{original_prompt}"
             )
