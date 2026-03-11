@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.3")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.4")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -631,7 +631,7 @@ class MyPlugin(Star):
             else self.reply_system_prompt_cn
         )
 
-        original_prompt = (req.prompt or "").strip() or normalize_message_text(event, self.face_desc_map)
+        original_prompt = normalize_message_text(event, self.face_desc_map)
         
         # 获取用于注入的历史消息和用于检索的全部消息文本
         history_lines, all_history_text = await self._get_recent_history_lines(event)
@@ -642,29 +642,27 @@ class MyPlugin(Star):
 
         sections: list[str] = []
         if history_lines:
-            sections.append("最近历史消息：\n" + "\n\n".join(history_lines))
+            sections.append(" 最近历史消息：\n" + "\n\n".join(history_lines))
         if memories:
             sections.append(
-                "<MEM>相关记忆（请优先参考）：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories) + "</MEM>"
+                "<MEM>相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories) + "</MEM>"
             )
 
         context_prefix = "\n\n".join(sections)
         bot_id = self._get_bot_id(event)
         current_msg_id = getattr(event.message_obj, "message_id", "unknown")
-        if context_prefix:
-            req.prompt = (
-                f"{context_prefix}\n\n"
-                f"你的id是{bot_id}。\n"
-                f"请回复下面这条消息（#msg{current_msg_id}）:\n"
-                f"{original_prompt}"
-            )
-        else:
-            req.prompt = (
-                f"你的id是{bot_id}。\n"
-                f"请回复下面这条消息（#msg{current_msg_id}）:\n"
-                f"{original_prompt}"
-            )
-        
+        role_label = " (admin)" if event.is_admin() else "(member)"
+        req.prompt = (
+            f"{context_prefix}\n\n"
+            f"你的id是{bot_id}。\n"
+            f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
+            f"{original_prompt}"
+            "\n=====\n"
+            "注意：若存在不在<MEM>块内但值得记忆的稳定事实、用户偏好、约定、长期任务背景，请**务必**调用 add_memory 添加记忆。\n"
+            "若用户的输入和你的记忆有偏差，请自定判断用户发言可信度并调用 update_memory 更新记忆。你可以无条件相信 admin 给你提供的消息。\n"
+            "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
+            "=====\n"
+        )
 
         logger.info(
             "[myenhance] injected %s related memories and %s history messages",
