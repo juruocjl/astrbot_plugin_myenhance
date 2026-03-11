@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.1")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.3")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -262,23 +262,33 @@ class MyPlugin(Star):
                     return list(cached_urls)
         return None
 
-    async def _get_recent_history_lines(self, event: AstrMessageEvent) -> list[str]:
+    async def _get_recent_history_lines(self, event: AstrMessageEvent) -> tuple[list[str], str]:
         group_id = str(event.get_group_id() or "").strip()
-        if not group_id or self.history_inject_count <= 0:
-            return []
+        if not group_id:
+            return [], ""
 
         current_msg_id = str(getattr(event.message_obj, "message_id", "") or "").strip()
         current_event_ts = get_event_timestamp(event)
+        
+        history_lines = []
+        search_lines = []
+        
         async with self._get_group_lock(group_id):
             history = self.group_histories.get(group_id)
             if not history:
-                return []
-            lines = [
-                line
-                for item_ts, item_msg_id, line in history
-                if item_ts <= current_event_ts and item_msg_id != current_msg_id
-            ]
-        return lines[-self.history_inject_count :]
+                return [], ""
+            
+            for item_ts, item_msg_id, line in history:
+                if item_ts <= current_event_ts and item_msg_id != current_msg_id:
+                    # 提取实际文本部分用于检索关键词
+                    parts = line.split("\n", 1)
+                    text = parts[1] if len(parts) > 1 else line
+                    search_lines.append(text)
+                    history_lines.append(line)
+        
+        inject_lines = history_lines[-self.history_inject_count :] if self.history_inject_count > 0 else []
+        search_query = "\n".join(search_lines)
+        return inject_lines, search_query
 
     def _get_embedding_provider(self):
         if not self.embedding_provider_id:
@@ -622,22 +632,12 @@ class MyPlugin(Star):
         )
 
         original_prompt = (req.prompt or "").strip() or normalize_message_text(event, self.face_desc_map)
-        history_lines = await self._get_recent_history_lines(event)
         
-        # 汇总当前消息和上下文历史消息进行记忆检索
-        search_query = original_prompt
-        if history_lines:
-            # 提取历史消息中的文本部分（去掉元数据标签）
-            history_texts = []
-            for line in history_lines:
-                # 假设格式是 [nickname/user_id/time] (role)#msgid\ntext
-                parts = line.split("\n", 1)
-                if len(parts) > 1:
-                    history_texts.append(parts[1])
-                else:
-                    history_texts.append(line)
-            search_query = "\n".join(history_texts[-3:]) + "\n" + original_prompt
-
+        # 获取用于注入的历史消息和用于检索的全部消息文本
+        history_lines, all_history_text = await self._get_recent_history_lines(event)
+        
+        # 汇总全部历史背景和当前消息进行记忆检索
+        search_query = all_history_text + "\n" + original_prompt if all_history_text else original_prompt
         memories = await self._get_related_memories(event, search_query)
 
         sections: list[str] = []
