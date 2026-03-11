@@ -67,7 +67,8 @@ class MyPlugin(Star):
     def _build_reply_system_prompt(self) -> str:
         return (
             "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。\n\n"
-            "请优先引用要回复的消息。若可从上下文中确定目标消息 ID，使用 <quote id=\"msg_id\"/> 并且必须放在输出最开头。\n"
+            "第一步：请先检查当前对话内容和注入的上下文，判断是否有值得保存的稳定事实、用户偏好或约定。如果是，请立即调用 add_memory 或 update_memory。注意：记忆工具的调用不影响你对群聊回复的输出。\n\n"
+            "第二步：根据上下文回复消息。请优先引用要回复的消息。若可从上下文中确定目标消息 ID，使用 <quote id=\"msg_id\"/> 并且必须放在输出最开头。\n"
             "每次只能引用一条消息。\n\n"
             "当需要提及用户时，使用 <mention id=\"user_id\"/>，可提及多个用户。\n"
             "user_id 可从消息格式 [nickname/user_id/time] 中提取。\n"
@@ -615,12 +616,12 @@ class MyPlugin(Star):
         history_lines = await self._get_recent_history_lines(event)
 
         sections: list[str] = []
-        if memories:
-            sections.append(
-                "相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
-            )
         if history_lines:
             sections.append("最近历史消息：\n" + "\n\n".join(history_lines))
+        if memories:
+            sections.append(
+                "相关记忆（请优先参考）：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
+            )
 
         context_prefix = "\n\n".join(sections)
         bot_id = self._get_bot_id(event)
@@ -638,6 +639,7 @@ class MyPlugin(Star):
                 f"请回复下面这条消息（#msg{current_msg_id}）:\n"
                 f"{original_prompt}"
             )
+        
 
         logger.info(
             "[myenhance] injected %s related memories and %s history messages",
