@@ -2,25 +2,32 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, defaultdict, deque
-from datetime import datetime
 import json
 from pathlib import Path
 import random
 import re
-from typing import Deque
 import uuid
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType
-from astrbot.api.message_components import At, AtAll, Face, Forward, Image, Plain, Reply, Json
+from astrbot.api.message_components import At, Face, Image, Plain, Reply, Json
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
+from .utils.face_map import load_face_desc_map
+from .utils.message_utils import (
+    format_time,
+    get_event_timestamp,
+    normalize_message_text,
+    extract_image_urls,
+)
+from .utils.cache_manager import CacheManager
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.3.9")
+
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.4.0")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -30,71 +37,28 @@ class MyPlugin(Star):
         super().__init__(context, config)
         self.config = config or {}
 
-        raw_max_history = self.config.get("max_history", 300)
-        try:
-            parsed = int(raw_max_history)
-        except (TypeError, ValueError):
-            parsed = 300
-        self.max_history = max(1, parsed)
+        # 加载基础配置
+        self._load_config()
 
-        self.active_reply_enable = bool(self.config.get("active_reply_enable", False))
-        raw_probability = self.config.get("active_reply_probability", 0.1)
-        try:
-            parsed_probability = float(raw_probability)
-        except (TypeError, ValueError):
-            parsed_probability = 0.1
-        self.active_reply_probability = min(max(parsed_probability, 0.0), 1.0)
-        raw_whitelist = self.config.get("active_reply_whitelist", [])
-        if isinstance(raw_whitelist, list):
-            self.active_reply_whitelist = {str(i) for i in raw_whitelist if str(i).strip()}
-        else:
-            self.active_reply_whitelist = set()
-
-        raw_event_cache_size = self.config.get("cached_size", 120)
-        try:
-            parsed_event_cache_size = int(raw_event_cache_size)
-        except (TypeError, ValueError):
-            parsed_event_cache_size = 120
-        self.event_cache_size = max(1, parsed_event_cache_size)
-
-        raw_describe_provider_id = self.config.get("describe_image_provider_id", "")
-        self.describe_image_provider_id = str(raw_describe_provider_id or "").strip()
-
-        raw_describe_ask = self.config.get(
-            "describe_image_ask",
-            "请客观描述这张图片中的主要内容，简洁一些。",
-        )
-        self.describe_image_ask = str(raw_describe_ask or "").strip() or (
-            "请客观描述这张图片中的主要内容，简洁一些。"
-        )
-
-        raw_image_url_cache_size = self.config.get("image_url_cache_size", 120)
-        try:
-            parsed_image_url_cache_size = int(raw_image_url_cache_size)
-        except (TypeError, ValueError):
-            parsed_image_url_cache_size = 120
-        self.image_url_cache_size = max(1, parsed_image_url_cache_size)
-
-        logger.debug(
-            "[myenhance] active_reply config: enable=%s probability=%.6f whitelist_size=%s",
-            self.active_reply_enable,
-            self.active_reply_probability,
-            len(self.active_reply_whitelist),
-        )
-
-        self.group_histories: dict[str, Deque[tuple[float, str]]] = defaultdict(
-            lambda: deque(maxlen=self.max_history)
-        )
-        self.recent_events: dict[str, Deque[tuple[str, list[str]]]] = defaultdict(
-            lambda: deque(maxlen=self.event_cache_size)
-        )
+        self.group_histories = defaultdict(lambda: deque(maxlen=self.max_history))
+        self.recent_events = defaultdict(lambda: deque(maxlen=self.event_cache_size))
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
-        self.face_desc_map = self._load_face_desc_map()
+        
+        # 加载表情映射
+        self.face_desc_map = load_face_desc_map()
+        
+        # 初始化持久化存储
         plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         plugin_data_path.mkdir(parents=True, exist_ok=True)
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
-        self._load_cache_state()
+        self.cache_manager = CacheManager(
+            self.cache_state_file,
+            self.max_history,
+            self.event_cache_size,
+            self.image_url_cache_size
+        )
+        self.cache_manager.load_cache_state(self.group_histories, self.recent_events, self.image_url_lru)
 
         self.reply_system_prompt_cn = (
             "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。\n\n"
@@ -124,12 +88,33 @@ class MyPlugin(Star):
             "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。"
         )
 
-    def _format_time(self, timestamp: int | float | None = None) -> str:
-        if not timestamp:
-            dt = datetime.now()
-        else:
-            dt = datetime.fromtimestamp(timestamp)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    def _load_config(self):
+        """解析插件配置。"""
+        raw_max_history = self.config.get("max_history", 300)
+        try: self.max_history = max(1, int(raw_max_history))
+        except (TypeError, ValueError): self.max_history = 300
+
+        self.active_reply_enable = bool(self.config.get("active_reply_enable", False))
+        raw_probability = self.config.get("active_reply_probability", 0.1)
+        try: self.active_reply_probability = min(max(float(raw_probability), 0.0), 1.0)
+        except (TypeError, ValueError): self.active_reply_probability = 0.1
+        
+        raw_whitelist = self.config.get("active_reply_whitelist", [])
+        self.active_reply_whitelist = {str(i) for i in raw_whitelist if str(i).strip()} if isinstance(raw_whitelist, list) else set()
+
+        raw_event_cache_size = self.config.get("cached_size", 120)
+        try: self.event_cache_size = max(1, int(raw_event_cache_size))
+        except (TypeError, ValueError): self.event_cache_size = 120
+
+        self.describe_image_provider_id = str(self.config.get("describe_image_provider_id", "") or "").strip()
+        self.describe_image_ask = str(self.config.get("describe_image_ask", "请客观描述这张图片中的主要内容，简洁一些。")).strip()
+
+        raw_image_url_cache_size = self.config.get("image_url_cache_size", 120)
+        try: self.image_url_cache_size = max(1, int(raw_image_url_cache_size))
+        except (TypeError, ValueError): self.image_url_cache_size = 120
+
+        logger.debug("[myenhance] active_reply config: enable=%s probability=%.6f whitelist_size=%s",
+                     self.active_reply_enable, self.active_reply_probability, len(self.active_reply_whitelist))
 
     def _get_group_lock(self, group_id: str) -> asyncio.Lock:
         lock = self.group_history_locks.get(group_id)
@@ -138,101 +123,11 @@ class MyPlugin(Star):
             self.group_history_locks[group_id] = lock
         return lock
 
-    def _get_event_timestamp(self, event: AstrMessageEvent) -> float:
-        timestamp = getattr(event.message_obj, "timestamp", None)
-        try:
-            if timestamp is None:
-                return datetime.now().timestamp()
-            return float(timestamp)
-        except (TypeError, ValueError):
-            return datetime.now().timestamp()
-
-    def _load_face_desc_map(self) -> dict[str, str]:
-        data_file = Path(__file__).with_name("assets") / "data.json"
-        mapping: dict[str, str] = {}
-        if not data_file.exists():
-            return mapping
-
-        try:
-            raw = json.loads(data_file.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning("[myenhance] failed to load face data map: %s", e)
-            return mapping
-
-        if not isinstance(raw, list):
-            return mapping
-
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            desc = str(item.get("describe") or item.get("QDes") or "").strip()
-            if not desc:
-                continue
-
-            value = item.get("emojiId")
-            if value is None:
-                value = item.get("QSid")
-            key = str(value).strip() if value is not None else ""
-            if key and key not in mapping:
-                mapping[key] = desc
-
-        return mapping
-
-    def _normalize_message_text(self, event: AstrMessageEvent) -> str:
-        """Normalize message chain using concise outline placeholders."""
-        messages = event.get_messages() or []
-        if not messages:
-            return (event.message_str or "").strip()
-
-        rendered_parts: list[str] = []
-
-        for comp in messages:
-            if isinstance(comp, Plain):
-                rendered_parts.append(comp.text)
-            elif isinstance(comp, Image):
-                rendered_parts.append("[image]")
-            elif isinstance(comp, Json):
-                payload = getattr(comp, "data", None)
-                prompt = ""
-                if isinstance(payload, dict):
-                    prompt = str(payload.get("prompt") or "").strip()
-                if prompt:
-                    rendered_parts.append(f"[Json:{prompt}]")
-                else:
-                    rendered_parts.append("[Json]")
-            elif isinstance(comp, Face):
-                face_id = str(getattr(comp, "id", "") or "").strip()
-                face_desc = self.face_desc_map.get(face_id)
-                if face_desc:
-                    rendered_parts.append(f"[face:{face_desc}]")
-                else:
-                    rendered_parts.append(f"[face:{face_id}]")
-            elif isinstance(comp, At):
-                rendered_parts.append(f"[at:{comp.name}/{comp.qq}]")
-            elif isinstance(comp, AtAll):
-                rendered_parts.append("[at:全体成员]")
-            elif isinstance(comp, Forward):
-                rendered_parts.append("[forward]")
-            elif isinstance(comp, Reply):
-                if getattr(comp, "id", ""):
-                    rendered_parts.append(f"[reply:{comp.id},{comp.sender_nickname}/{comp.sender_id}]")
-                else:
-                    rendered_parts.append("[reply]")
-            else:
-                rendered_parts.append(f"[{getattr(comp, 'type', '消息')}]")
-
-            rendered_parts.append(" ")
-
-        normalized = "".join(rendered_parts).strip()
-        return normalized or (event.message_str or "").strip()
-
     async def _record_line(self, group_id: str, event_ts: float, line: str) -> None:
-        if not group_id:
-            return
-        lock = self._get_group_lock(group_id)
-        async with lock:
+        if not group_id: return
+        async with self._get_group_lock(group_id):
             self.group_histories[group_id].append((event_ts, line))
-        self._save_cache_state()
+        self.cache_manager.save_cache_state(self.group_histories, self.recent_events, self.image_url_lru)
 
     def _get_event_scope_id(self, event: AstrMessageEvent) -> str:
         return event.get_group_id() or event.unified_msg_origin
@@ -240,513 +135,198 @@ class MyPlugin(Star):
     async def _cache_recent_event(self, event: AstrMessageEvent) -> None:
         scope_id = self._get_event_scope_id(event)
         msg_id = str(getattr(event.message_obj, "message_id", "") or "").strip()
-        if not scope_id or not msg_id:
-            return
-        image_urls = self._extract_image_urls(event)
+        if not scope_id or not msg_id: return
+        image_urls = extract_image_urls(event)
 
-        lock = self._get_group_lock(scope_id)
-        async with lock:
+        async with self._get_group_lock(scope_id):
             cached = self.recent_events[scope_id]
-            if cached:
-                deduped = [(mid, urls) for mid, urls in cached if mid != msg_id]
-                cached.clear()
-                cached.extend(deduped)
+            deduped = [(mid, urls) for mid, urls in cached if mid != msg_id]
+            cached.clear()
+            cached.extend(deduped)
             cached.append((msg_id, image_urls))
-        self._save_cache_state()
+        self.cache_manager.save_cache_state(self.group_histories, self.recent_events, self.image_url_lru)
 
     def _get_cached_image_desc(self, image_url: str) -> str | None:
         key = str(image_url or "").strip()
-        if not key:
-            return None
+        if not key: return None
         value = self.image_url_lru.get(key)
-        if value is None:
-            return None
-        # LRU touch
-        self.image_url_lru.move_to_end(key)
+        if value is not None:
+            self.image_url_lru.move_to_end(key)
         return value
 
     def _set_cached_image_desc(self, image_url: str, description: str) -> None:
         key = str(image_url or "").strip()
-        if not key:
-            return
+        if not key: return
         self.image_url_lru[key] = description
         self.image_url_lru.move_to_end(key)
         while len(self.image_url_lru) > self.image_url_cache_size:
             self.image_url_lru.popitem(last=False)
-        self._save_cache_state()
+        self.cache_manager.save_cache_state(self.group_histories, self.recent_events, self.image_url_lru)
 
-    def _load_cache_state(self) -> None:
-        if not self.cache_state_file.exists():
-            return
-        try:
-            data = json.loads(self.cache_state_file.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning("[myenhance] failed to load cache state: %s", e)
-            return
-
-        try:
-            raw_group_histories = data.get("group_histories", {})
-            if isinstance(raw_group_histories, dict):
-                for group_id, items in raw_group_histories.items():
-                    if not isinstance(group_id, str) or not isinstance(items, list):
-                        continue
-                    dq: Deque[tuple[float, str]] = deque(maxlen=self.max_history)
-                    for item in items:
-                        if not (isinstance(item, list) and len(item) == 2):
-                            continue
-                        try:
-                            ts = float(item[0])
-                        except (TypeError, ValueError):
-                            continue
-                        line = str(item[1])
-                        dq.append((ts, line))
-                    if dq:
-                        self.group_histories[group_id] = dq
-
-            raw_recent_events = data.get("recent_events", {})
-            if isinstance(raw_recent_events, dict):
-                for scope_id, items in raw_recent_events.items():
-                    if not isinstance(scope_id, str) or not isinstance(items, list):
-                        continue
-                    dq2: Deque[tuple[str, list[str]]] = deque(maxlen=self.event_cache_size)
-                    for item in items:
-                        if not (isinstance(item, list) and len(item) == 2):
-                            continue
-                        msg_id = str(item[0]).strip()
-                        urls_raw = item[1]
-                        if not msg_id or not isinstance(urls_raw, list):
-                            continue
-                        urls = [str(u).strip() for u in urls_raw if str(u).strip()]
-                        dq2.append((msg_id, urls))
-                    if dq2:
-                        self.recent_events[scope_id] = dq2
-
-            raw_image_url_lru = data.get("image_url_lru", [])
-            if isinstance(raw_image_url_lru, list):
-                self.image_url_lru.clear()
-                for item in raw_image_url_lru:
-                    if not (isinstance(item, list) and len(item) == 2):
-                        continue
-                    k = str(item[0]).strip()
-                    v = str(item[1]).strip()
-                    if k and v:
-                        self.image_url_lru[k] = v
-                while len(self.image_url_lru) > self.image_url_cache_size:
-                    self.image_url_lru.popitem(last=False)
-        except Exception as e:
-            logger.warning("[myenhance] failed to parse cache state: %s", e)
-
-    def _save_cache_state(self) -> None:
-        try:
-            payload = {
-                "group_histories": {
-                    group_id: [[ts, line] for ts, line in history]
-                    for group_id, history in self.group_histories.items()
-                },
-                "recent_events": {
-                    scope_id: [[msg_id, urls] for msg_id, urls in entries]
-                    for scope_id, entries in self.recent_events.items()
-                },
-                "image_url_lru": [[k, v] for k, v in self.image_url_lru.items()],
-            }
-            self.cache_state_file.write_text(
-                json.dumps(payload, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.warning("[myenhance] failed to save cache state: %s", e)
-
-    async def _get_cached_image_urls_by_msg_id(
-        self,
-        event: AstrMessageEvent,
-        msg_id: str,
-    ) -> list[str] | None:
+    async def _get_cached_image_urls_by_msg_id(self, event: AstrMessageEvent, msg_id: str) -> list[str] | None:
         scope_id = self._get_event_scope_id(event)
-        target_id = str(msg_id or "").strip()
-        if not scope_id or not target_id:
-            return None
-
-        lock = self._get_group_lock(scope_id)
-        async with lock:
+        if not scope_id or not msg_id: return None
+        async with self._get_group_lock(scope_id):
             for cached_msg_id, cached_urls in reversed(self.recent_events.get(scope_id, [])):
-                if cached_msg_id == target_id:
+                if cached_msg_id == msg_id:
                     return cached_urls
         return None
 
-    def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
-        """Collect image URLs/paths from structured message segments with raw fallback."""
-        urls: list[str] = []
-
-        for comp in event.get_messages() or []:
-            if isinstance(comp, Image):
-                url = (getattr(comp, "url", None) or getattr(comp, "file", None) or "").strip()
-                if url:
-                    urls.append(url)
-                continue
-
-            if isinstance(comp, dict):
-                comp_type = str(comp.get("type", "")).lower()
-                if comp_type != "image":
-                    continue
-                data = comp.get("data", {})
-                if isinstance(data, dict):
-                    url = str(data.get("url") or data.get("file") or "").strip()
-                    if url:
-                        urls.append(url)
-
-        if urls:
-            return urls
-        return urls
-
     @filter.llm_tool(name="describe_image")
-    async def describe_image_with_llm(
-        self,
-        event: AstrMessageEvent,
-        msgid: str = "",
-        image_index: int = 1,
-    ) -> str:
+    async def describe_image_with_llm(self, event: AstrMessageEvent, msgid: str = "", image_index: int = 1) -> str:
         """调用当前聊天模型描述图片内容。
-
         Args:
             msgid(string): 需要描述的消息编号（message_id）。会尝试从该消息中提取图片。
             image_index(number): 第几张图片，从 1 开始。
-
         """
         target_msg_id = (msgid or "").strip()
-
-        try:
-            idx = int(image_index)
-        except (TypeError, ValueError):
-            idx = 1
-        idx = max(1, idx)
+        idx = max(1, int(image_index))
         selected_index = idx - 1
 
         candidate_images: list[str] = []
-
         if target_msg_id:
             cached_images = await self._get_cached_image_urls_by_msg_id(event, target_msg_id)
-            if cached_images:
-                candidate_images = cached_images
+            if cached_images: candidate_images = cached_images
 
         if not candidate_images and target_msg_id:
-            candidate_images = await extract_quoted_message_images(
-                event,
-                reply_component=Reply(id=target_msg_id),
-            )
+            candidate_images = await extract_quoted_message_images(event, reply_component=Reply(id=target_msg_id))
 
-        if not candidate_images:
-            candidate_images = self._extract_image_urls(event)
-
-        if not candidate_images:
-            return "Error: no image found for describe_image."
-
+        if not candidate_images: candidate_images = extract_image_urls(event)
+        if not candidate_images: return "Error: no image found for describe_image."
         if selected_index >= len(candidate_images):
-            return (
-                f"Error: image_index out of range. Found {len(candidate_images)} image(s), "
-                f"but got {idx}."
-            )
+            return f"Error: image_index out of range. Found {len(candidate_images)} image(s), but got {idx}."
 
         target_image = candidate_images[selected_index]
-
         cached_desc = self._get_cached_image_desc(target_image)
-        if cached_desc:
-            logger.debug("[myenhance] describe_image hit url cache")
-            return cached_desc
+        if cached_desc: return cached_desc
 
-        provider = None
-        if self.describe_image_provider_id:
-            provider = self.context.get_provider_by_id(self.describe_image_provider_id)
-            if not provider:
-                logger.warning(
-                    "[myenhance] describe_image configured provider not found: %s, fallback to using provider",
-                    self.describe_image_provider_id,
-                )
+        provider = (self.context.get_provider_by_id(self.describe_image_provider_id) 
+                   if self.describe_image_provider_id else None) or self.context.get_using_provider(event.unified_msg_origin)
+        if not provider: return "Error: no provider found for current session."
 
-        if not provider:
-            provider = self.context.get_using_provider(event.unified_msg_origin)
-        if not provider:
-            return "Error: no provider found for current session."
-
-        ask = self.describe_image_ask
         try:
-            resp = await provider.text_chat(
-                prompt=ask,
-                session_id=uuid.uuid4().hex,
-                image_urls=[target_image],
-                persist=False,
-            )
+            resp = await provider.text_chat(prompt=self.describe_image_ask, session_id=uuid.uuid4().hex,
+                                          image_urls=[target_image], persist=False)
+            text = (getattr(resp, "completion_text", "") or "").strip()
+            if not text: return "Error: image description result is empty."
+            self._set_cached_image_desc(target_image, text)
+            return text
         except Exception as e:
             logger.exception("[myenhance] describe_image failed")
             return f"Error: failed to describe image: {e}"
 
-        text = (getattr(resp, "completion_text", "") or "").strip()
-        if not text:
-            return "Error: image description result is empty."
-        self._set_cached_image_desc(target_image, text)
-        logger.debug("[myenhance] describe_image got response: %s", text)
-        return text
-
     def _format_member_message(self, event: AstrMessageEvent) -> str:
         poke_text = self._format_poke_message(event)
-        if poke_text:
-            return poke_text
+        if poke_text: return poke_text
 
         nickname = event.get_sender_name() or "unknown"
         sender_id = event.get_sender_id() or "unknown"
         role = "admin" if event.is_admin() else "member"
         timestamp = getattr(event.message_obj, "timestamp", None)
         msg_id = getattr(event.message_obj, "message_id", None) or "unknown"
-        text = self._normalize_message_text(event)
-        return (
-            f"[{nickname}/{sender_id}/{self._format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
-        )
+        text = normalize_message_text(event, self.face_desc_map)
+        return f"[{nickname}/{sender_id}/{format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
 
     def _format_poke_message(self, event: AstrMessageEvent) -> str | None:
         raw_message = getattr(event.message_obj, "raw_message", None)
-        if not isinstance(raw_message, dict):
+        if not isinstance(raw_message, dict) or str(raw_message.get("notice_type")) != "notify" or str(raw_message.get("sub_type")) != "poke":
             return None
-
-        if str(raw_message.get("notice_type") or "") != "notify":
-            return None
-        if str(raw_message.get("sub_type") or "") != "poke":
-            return None
-
         user_id = str(raw_message.get("user_id") or event.get_sender_id() or "unknown")
         target_id = str(raw_message.get("target_id") or "unknown")
         ts = raw_message.get("time") or getattr(event.message_obj, "timestamp", None)
-        return f"[戳一戳/{self._format_time(ts)}]\n{user_id} 戳了戳 {target_id}"
+        return f"[戳一戳/{format_time(ts)}]\n{user_id} 戳了戳 {target_id}"
 
     def _get_bot_id(self, event: AstrMessageEvent) -> str:
         return str(event.get_self_id() or "unknown").strip() or "unknown"
 
-    def _dump_for_log(self, obj) -> str:
-        try:
-            if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
-                payload = obj.model_dump()
-            elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):
-                payload = obj.dict()
-            elif hasattr(obj, "__dict__"):
-                payload = vars(obj)
-            else:
-                payload = str(obj)
-            return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        except Exception:
-            return repr(obj)
-
     def _parse_control_tags_to_chain(self, text: str) -> MessageChain | None:
-        """将模型输出中的控制标签解析为消息链组件。"""
-        if not text:
-            return None
-
+        if not text: return None
         match = self.QUOTE_HEAD_RE.match(text)
         quote_id = match.group(1).strip() if match else ""
         body = text[match.end() :] if match else text
-        touched = bool(match)
-        chain: list = []
+        touched, chain = bool(match), []
 
-        if quote_id:
-            chain.append(Reply(id=quote_id))
-
+        if quote_id: chain.append(Reply(id=quote_id))
         cursor = 0
         for m in self.MENTION_RE.finditer(body):
             touched = True
             if m.start() > cursor:
                 plain = body[cursor : m.start()]
-                if plain:
-                    chain.append(Plain(plain))
-            mention_id = m.group(1).strip()
-            if mention_id:
-                chain.append(At(qq=mention_id, name=""))
+                if plain: chain.append(Plain(plain))
+            if m.group(1).strip(): chain.append(At(qq=m.group(1).strip(), name=""))
             cursor = m.end()
 
         if cursor < len(body):
             tail = body[cursor:]
-            if tail:
-                chain.append(Plain(tail))
-
-        if not touched:
-            return None
-
-        return MessageChain(chain=chain)
+            if tail: chain.append(Plain(tail))
+        return MessageChain(chain=chain) if touched else None
 
     def _should_active_reply(self, event: AstrMessageEvent) -> bool:
-        if not self.active_reply_enable:
-            logger.debug("[myenhance] active_reply skipped: feature disabled")
+        if not self.active_reply_enable or self._format_poke_message(event) or event.get_sender_id() == event.get_self_id() or event.is_at_or_wake_command:
             return False
-        if self._format_poke_message(event):
-            logger.debug("[myenhance] active_reply skipped: poke event")
-            return False
-        if event.get_sender_id() == event.get_self_id():
-            logger.debug("[myenhance] active_reply skipped: self message")
-            return False
-        if event.is_at_or_wake_command:
-            logger.debug("[myenhance] active_reply skipped: wake/at command message")
-            return False
-
         group_id = event.get_group_id()
-        if not group_id:
-            logger.debug("[myenhance] active_reply skipped: non-group message")
+        if not group_id or (self.active_reply_whitelist and group_id not in self.active_reply_whitelist):
             return False
-        if self.active_reply_whitelist and group_id not in self.active_reply_whitelist:
-            logger.debug(
-                "[myenhance] active_reply skipped: group %s not in whitelist",
-                group_id,
-            )
-            return False
-
-        text = self._normalize_message_text(event)
-        if not text:
-            logger.debug("[myenhance] active_reply skipped: empty text")
-            return False
-
+        if not normalize_message_text(event, self.face_desc_map): return False
         roll = random.random()
-        logger.debug(
-            "[myenhance] active_reply roll=%.6f threshold=%.6f group=%s",
-            roll,
-            self.active_reply_probability,
-            group_id,
-        )
-        if roll >= self.active_reply_probability:
-            logger.debug("[myenhance] active_reply skipped: roll not hit")
-            return False
-        return True
+        return roll < self.active_reply_probability
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
-        logger.debug("[myenhance] message_obj detail:\n%s", self._dump_for_log(event.message_obj))
-        
-        """记录群友消息，并按概率触发主动回复。"""
         group_id = event.get_group_id()
-        if not group_id:
-            return
-
-        if event.get_sender_id() == event.get_self_id():
-            return
+        if not group_id or event.get_sender_id() == event.get_self_id(): return
 
         await self._cache_recent_event(event)
-
         line = self._format_member_message(event)
-        event_ts = self._get_event_timestamp(event)
-
+        event_ts = get_event_timestamp(event)
         await self._record_line(group_id, event_ts, line)
 
-        if not self._should_active_reply(event):
-            return
-
-        provider = self.context.get_using_provider(event.unified_msg_origin)
-        if not provider:
-            logger.error("[myenhance] active_reply: no provider found")
-            return
-
-        session_curr_cid = await self.context.conversation_manager.get_curr_conversation_id(
-            event.unified_msg_origin,
-        )
-        if not session_curr_cid:
-            logger.info("[myenhance] active_reply skipped: no active conversation")
-            return
-
-        conv = await self.context.conversation_manager.get_conversation(
-            event.unified_msg_origin,
-            session_curr_cid,
-        )
-        if not conv:
-            logger.info("[myenhance] active_reply skipped: conversation not found")
-            return
-
-        logger.info(
-            "[myenhance] active_reply triggered: group=%s probability=%.3f",
-            group_id,
-            self.active_reply_probability,
-        )
-        normalized_prompt = self._normalize_message_text(event)
-        yield event.request_llm(
-            prompt=normalized_prompt,
-            session_id=event.session_id,
-            conversation=conv,
-        )
+        if self._should_active_reply(event):
+            session_curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
+            if not session_curr_cid: return
+            conv = await self.context.conversation_manager.get_conversation(event.unified_msg_origin, session_curr_cid)
+            if not conv: return
+            logger.info("[myenhance] active_reply triggered for group %s", group_id)
+            yield event.request_llm(prompt=normalize_message_text(event, self.face_desc_map), session_id=event.session_id, conversation=conv)
 
     @filter.on_llm_request()
-    async def inject_group_history_to_prompt(
-        self,
-        event: AstrMessageEvent,
-        req: ProviderRequest,
-    ):
-        """在 LLM 请求前，把群内已记录消息拼接到 req.prompt。"""
-        if req.system_prompt:
-            req.system_prompt = f"{req.system_prompt}\n\n{self.reply_system_prompt_cn}"
-        else:
-            req.system_prompt = self.reply_system_prompt_cn
-
+    async def inject_group_history_to_prompt(self, event: AstrMessageEvent, req: ProviderRequest):
+        req.system_prompt = f"{req.system_prompt}\n\n{self.reply_system_prompt_cn}" if req.system_prompt else self.reply_system_prompt_cn
         group_id = event.get_group_id()
-        if not group_id:
-            return
+        if not group_id: return
 
-        lock = self._get_group_lock(group_id)
-        async with lock:
+        async with self._get_group_lock(group_id):
             history = self.group_histories.get(group_id)
-            if not history:
-                return
-
-            current_event_ts = self._get_event_timestamp(event)
-            pop_lines: list[str] = []
-            remaining: Deque[tuple[float, str]] = deque(maxlen=self.max_history)
-
-            for item_ts, item_line in history:
-                if item_ts <= current_event_ts:
-                    pop_lines.append(item_line)
-                    continue
-                remaining.append((item_ts, item_line))
-
-            if not pop_lines:
-                return
-
+            if not history: return
+            current_event_ts = get_event_timestamp(event)
+            pop_lines, remaining = [], deque(maxlen=self.max_history)
+            for ts, ln in history:
+                if ts <= current_event_ts: pop_lines.append(ln)
+                else: remaining.append((ts, ln))
+            if not pop_lines: return
             history_text = "\n\n".join(pop_lines)
-            history_count = len(pop_lines)
             self.group_histories[group_id] = remaining
-        self._save_cache_state()
+        self.cache_manager.save_cache_state(self.group_histories, self.recent_events, self.image_url_lru)
 
-        original_prompt = (req.prompt or "").strip()
-        if not original_prompt:
-            original_prompt = self._normalize_message_text(event)
+        original_prompt = (req.prompt or "").strip() or normalize_message_text(event, self.face_desc_map)
         if original_prompt:
             bot_id = self._get_bot_id(event)
-            req.prompt = (
-                f"{history_text}\n\n"
-                f"你的id是{bot_id}。\n"
-                f"请回复下面这条消息（#msg{getattr(event.message_obj, 'message_id', 'unknown')}）:\n"
-                f"{original_prompt}"
-            )
+            req.prompt = (f"{history_text}\n\n你的id是{bot_id}。\n请回复下面这条消息（#msg{getattr(event.message_obj, 'message_id', 'unknown')}）:\n{original_prompt}")
         else:
             req.prompt = history_text
-
-        logger.info(
-            "[myenhance] injected %s history records into prompt for group %s and popped only records older than current event timestamp",
-            history_count,
-            group_id,
-        )
+        logger.info("[myenhance] injected %s history records into prompt", len(pop_lines))
 
     @filter.on_decorating_result()
     async def parse_control_tags_in_decorating_result(self, event: AstrMessageEvent):
-        """发送前把输出文本中的 quote/mention 标签解析为真实消息链。"""
         result = event.get_result()
-        if not result or not result.chain:
+        if not result or not result.chain or any(not isinstance(comp, Plain) for comp in result.chain):
             return
-
-        # 仅处理纯文本结果，避免覆盖插件/平台已构造好的非文本消息段。
-        if any(not isinstance(comp, Plain) for comp in result.chain):
-            return
-
-        text = "".join(comp.text for comp in result.chain if isinstance(comp, Plain))
-
+        text = "".join(comp.text for comp in result.chain)
         if self.REFUSE_ONLY_RE.match(text):
             result.chain = []
             event.stop_event()
-            logger.info("[myenhance] got <refuse/>, suppress outgoing message")
             return
-
         parsed_chain = self._parse_control_tags_to_chain(text)
-        if not parsed_chain:
-            return
+        if parsed_chain:
+            result.chain = parsed_chain.chain
 
-        result.chain = parsed_chain.chain
-        logger.info("[myenhance] parsed control tags into chain in on_decorating_result")
