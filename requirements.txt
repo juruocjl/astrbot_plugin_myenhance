@@ -1,0 +1,3 @@
+astrbot>=4.19.2
+flask
+rank_bm25
