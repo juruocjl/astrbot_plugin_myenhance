@@ -14,6 +14,7 @@ class MemoryRecord:
     content: str
     created_at: str
     updated_at: str
+    embedding: list[float] | None = None
 
 
 class MemoryStore:
@@ -52,6 +53,10 @@ class MemoryStore:
                 content = str(item.get("content") or "").strip()
                 created_at = str(item.get("created_at") or "").strip()
                 updated_at = str(item.get("updated_at") or created_at or "").strip()
+                embedding = item.get("embedding")
+                if not isinstance(embedding, list):
+                    embedding = None
+                
                 if not memory_id or not content:
                     continue
                 records.append(
@@ -60,6 +65,7 @@ class MemoryStore:
                         content=content,
                         created_at=created_at or self._now_iso(),
                         updated_at=updated_at or self._now_iso(),
+                        embedding=embedding,
                     )
                 )
 
@@ -86,7 +92,7 @@ class MemoryStore:
     def list_memories(self, scope_id: str) -> list[MemoryRecord]:
         return list(self.memories_by_scope.get(scope_id, []))
 
-    def add_memory(self, scope_id: str, content: str) -> MemoryRecord:
+    def add_memory(self, scope_id: str, content: str, embedding: list[float] | None = None) -> MemoryRecord:
         normalized_scope = str(scope_id or "").strip()
         normalized_content = str(content or "").strip()
         if not normalized_scope:
@@ -101,6 +107,7 @@ class MemoryStore:
             content=normalized_content,
             created_at=now,
             updated_at=now,
+            embedding=embedding,
         )
         records.append(record)
         if len(records) > self.max_records_per_scope:
@@ -108,7 +115,7 @@ class MemoryStore:
         self.save()
         return record
 
-    def update_memory(self, scope_id: str, memory_id: str, content: str) -> MemoryRecord | None:
+    def update_memory(self, scope_id: str, memory_id: str, content: str, embedding: list[float] | None = None) -> MemoryRecord | None:
         normalized_scope = str(scope_id or "").strip()
         normalized_id = str(memory_id or "").strip()
         normalized_content = str(content or "").strip()
@@ -120,6 +127,7 @@ class MemoryStore:
                 continue
             record.content = normalized_content
             record.updated_at = self._now_iso()
+            record.embedding = embedding
             self.save()
             return record
         return None

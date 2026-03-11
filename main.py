@@ -309,26 +309,47 @@ class MyPlugin(Star):
             return None
         return provider
 
-    async def _build_embedding_scores(self, query: str, documents: list[str]) -> list[float] | None:
+    async def _build_embedding_scores(self, query: str, records: list[MemoryRecord]) -> list[float] | None:
         provider = self._get_embedding_provider()
-        if not provider or not documents:
+        if not provider or not records:
             return None
+
+        # 尝试使用已有的 embedding，如果没有则实时获取
+        documents_to_embed = []
+        doc_indices_to_embed = []
+        
+        final_embedding_scores = [0.0] * len(records)
+        document_vectors = [None] * len(records)
+
+        for i, record in enumerate(records):
+            if record.embedding is not None:
+                document_vectors[i] = record.embedding
+            else:
+                documents_to_embed.append(record.content)
+                doc_indices_to_embed.append(i)
 
         try:
             query_vector = await provider.get_embedding(query)
-            if callable(getattr(provider, "get_embeddings", None)):
-                document_vectors = await provider.get_embeddings(documents)
-            else:
-                document_vectors = [await provider.get_embedding(document) for document in documents]
+            
+            # 如果有需要获取的 embedding
+            if documents_to_embed:
+                logger.info("[myenhance] fetching embeddings for %d records", len(documents_to_embed))
+                if callable(getattr(provider, "get_embeddings", None)):
+                    new_vectors = await provider.get_embeddings(documents_to_embed)
+                else:
+                    new_vectors = [await provider.get_embedding(doc) for doc in documents_to_embed]
+                
+                # 回填并持久化
+                for i, vector in zip(doc_indices_to_embed, new_vectors):
+                    document_vectors[i] = vector
+                    records[i].embedding = vector
+                self.memory_store.save()
+
+            return [self._cosine_similarity(query_vector, vector) for vector in document_vectors]
+
         except Exception as exc:
             logger.warning("[myenhance] failed to get embeddings: %s", exc)
             return None
-
-        if len(document_vectors) != len(documents):
-            logger.warning("[myenhance] embedding result length mismatch")
-            return None
-
-        return [self._cosine_similarity(query_vector, vector) for vector in document_vectors]
 
     def _cosine_similarity(self, left: list[float], right: list[float]) -> float:
         if not left or not right or len(left) != len(right):
@@ -354,7 +375,7 @@ class MyPlugin(Star):
 
         embedding_scores = await self._build_embedding_scores(
             query,
-            [record.content for record in records],
+            records,
         )
         return [
             item.record
@@ -547,12 +568,21 @@ class MyPlugin(Star):
         if not scope_id:
             return "Error: no valid scope for memory."
 
+        embedding = None
+        provider = self._get_embedding_provider()
+        if provider:
+            try:
+                embedding = await provider.get_embedding(normalized_content)
+            except Exception as exc:
+                logger.warning("[myenhance] failed to get embedding for new memory: %s", exc)
+
         try:
-            record = self.memory_store.add_memory(scope_id, normalized_content)
+            record = self.memory_store.add_memory(scope_id, normalized_content, embedding=embedding)
         except ValueError as exc:
             return f"Error: {exc}"
 
-        logger.info("[myenhance] added memory %s in scope %s", record.id, scope_id)
+        logger.info("[myenhance] added memory %s in scope %s (with embedding: %s)", 
+                    record.id, scope_id, bool(embedding))
         return f"Added memory: id={record.id} content={record.content}"
 
     @filter.llm_tool(name="update_memory")
@@ -574,11 +604,20 @@ class MyPlugin(Star):
         if not scope_id:
             return "Error: no valid scope for memory."
 
-        record = self.memory_store.update_memory(scope_id, normalized_id, normalized_content)
+        embedding = None
+        provider = self._get_embedding_provider()
+        if provider:
+            try:
+                embedding = await provider.get_embedding(normalized_content)
+            except Exception as exc:
+                logger.warning("[myenhance] failed to get embedding for updated memory: %s", exc)
+
+        record = self.memory_store.update_memory(scope_id, normalized_id, normalized_content, embedding=embedding)
         if not record:
             return f"Error: memory not found: {normalized_id}"
 
-        logger.info("[myenhance] updated memory %s in scope %s", record.id, scope_id)
+        logger.info("[myenhance] updated memory %s in scope %s (with embedding: %s)", 
+                    record.id, scope_id, bool(embedding))
         return f"Updated memory: id={record.id} content={record.content}"
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
