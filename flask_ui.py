@@ -105,13 +105,21 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
 
     @app.route('/api/list')
     def api_list():
-        data = {"scopes": {}}
-        for s_id, records in plugin_instance.memory_store.memories_by_scope.items():
-            data["scopes"][s_id] = [
-                {"id": r.id, "content": r.content, "updated_at": r.updated_at}
-                for r in records
-            ]
-        return jsonify(data)
+        try:
+            data = {"scopes": {}}
+            scopes_items = plugin_instance.memory_store.memories_by_scope.items()
+            logger.info(f"[myenhance] Flask /api/list: found {len(scopes_items)} scopes.")
+            
+            for s_id, records in scopes_items:
+                logger.info(f"[myenhance] Flask /api/list: scope {s_id} has {len(records)} records.")
+                data["scopes"][s_id] = [
+                    {"id": r.id, "content": r.content, "updated_at": r.updated_at}
+                    for r in records
+                ]
+            return jsonify(data)
+        except Exception as e:
+            logger.exception(f"[myenhance] Error in /api/list: {e}")
+            return jsonify({"scopes": {}, "error": str(e)}), 500
 
     @app.route('/api/update', methods=['POST'])
     def api_update():
