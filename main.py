@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.4")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.5")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -636,9 +636,24 @@ class MyPlugin(Star):
         # 获取用于注入的历史消息和用于检索的全部消息文本
         history_lines, all_history_text = await self._get_recent_history_lines(event)
         
-        # 汇总全部历史背景和当前消息进行记忆检索
-        search_query = all_history_text + "\n" + original_prompt if all_history_text else original_prompt
-        memories = await self._get_related_memories(event, search_query)
+        # 1. 优先检索当前消息相关的记忆
+        current_memories = await self._get_related_memories(event, original_prompt)
+        
+        # 2. 检索历史背景相关的记忆
+        context_memories = []
+        if all_history_text:
+            context_memories = await self._get_related_memories(event, all_history_text)
+            
+        # 3. 合并记忆并去重，保持当前消息的相关记忆在前
+        seen_ids = set()
+        memories = []
+        for m in current_memories + context_memories:
+            if m.id not in seen_ids:
+                memories.append(m)
+                seen_ids.add(m.id)
+        
+        # 限制最终注入的数量（取配置值）
+        memories = memories[:self.memory_recall_count]
 
         sections: list[str] = []
         if history_lines:
