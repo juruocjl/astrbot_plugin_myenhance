@@ -30,6 +30,12 @@
     "_special": "select_provider",
     "default": ""
   },
+  "embedding_provider_id": {
+    "description": "记忆检索使用的 embedding provider_id，留空则回退为本地哈希向量",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
+  },
   "describe_image_ask": {
     "description": "describe_image 调用模型时使用的提示词",
     "type": "string",
@@ -39,5 +45,25 @@
     "description": "图片 URL 的 LRU 缓存容量（保留最近多少张图片的描述结果）",
     "type": "int",
     "default": 120
+  },
+  "memory_recall_count": {
+    "description": "每次向 prompt 注入多少条与当前消息相关的记忆",
+    "type": "int",
+    "default": 5
+  },
+  "history_inject_count": {
+    "description": "每次向 prompt 注入多少条最近历史消息",
+    "type": "int",
+    "default": 12
+  },
+  "memory_max_records": {
+    "description": "每个会话范围最多保存多少条记忆",
+    "type": "int",
+    "default": 500
+  },
+  "rrf_k": {
+    "description": "RRF 混合搜索的平滑常数 (k)，决定了排序权重的衰减速度，默认 60",
+    "type": "int",
+    "default": 60
   }
 }

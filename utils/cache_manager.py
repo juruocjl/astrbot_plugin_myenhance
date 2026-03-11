@@ -26,10 +26,15 @@ class CacheManager:
             raw_group_histories = data.get("group_histories", {})
             if isinstance(raw_group_histories, dict):
                 for group_id, items in raw_group_histories.items():
-                    dq: Deque[tuple[float, str]] = deque(maxlen=self.max_history)
+                    dq: Deque[tuple[float, str, str]] = deque(maxlen=self.max_history)
                     for item in items:
-                        if isinstance(item, list) and len(item) == 2:
-                            dq.append((float(item[0]), str(item[1])))
+                        if not isinstance(item, list):
+                            continue
+                        if len(item) == 3:
+                            dq.append((float(item[0]), str(item[1]), str(item[2])))
+                            continue
+                        if len(item) == 2:
+                            dq.append((float(item[0]), "unknown", str(item[1])))
                     if dq:
                         group_histories[group_id] = dq
 
@@ -58,7 +63,7 @@ class CacheManager:
         try:
             payload = {
                 "group_histories": {
-                    gid: [[ts, ln] for ts, ln in history]
+                    gid: [[ts, msg_id, ln] for ts, msg_id, ln in history]
                     for gid, history in group_histories.items()
                 },
                 "recent_events": {
