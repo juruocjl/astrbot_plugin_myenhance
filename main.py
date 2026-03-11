@@ -21,12 +21,12 @@ from astrbot.core.utils.quoted_message_parser import extract_quoted_message_imag
 from .utils.cache_manager import CacheManager
 from .utils.face_map import load_face_desc_map
 from .utils.hybrid_retrieval import hybrid_search
-from .utils.memory_store import MemoryStore
+from .utils.memory_store import MemoryRecord, MemoryStore
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.7")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.8")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
