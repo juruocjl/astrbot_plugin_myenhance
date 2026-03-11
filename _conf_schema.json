@@ -33,7 +33,6 @@
   "embedding_provider_id": {
     "description": "记忆检索使用的 embedding provider_id，留空则回退为本地哈希向量",
     "type": "string",
-    "_special": "select_provider",
     "default": ""
   },
   "describe_image_ask": {
