@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.0")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.1")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -79,12 +79,13 @@ class MyPlugin(Star):
             "quote 不是容器标签，绝对不要输出 </quote>。\n"
             "若无法或不应回复，完整输出 <refuse/>，且前后不得有任何其他字符。\n\n"
             "系统会注入两类上下文：\n"
-            "1. 与当前消息有关的记忆，格式为 [mem-id] 内容；\n"
+            "1. 与当前消息有关的记忆，格式为 <MEM>[mem-id] 内容；...</MEM>\n"
             "2. 最近历史消息，格式中包含 #msg消息ID 和消息内容。\n\n"
-            "当你发现某个稳定事实、用户偏好、约定、长期任务背景值得保存时，调用 add_memory。\n"
+            "当你发现某个稳定事实、用户偏好、约定、长期任务背景值得保存时，并且不在<MEM>块内，调用 add_memory。\n"
             "add_memory 的参数 content 必须是一句可长期复用的记忆。\n"
             "当已有记忆不准确、过期或需要修正时，调用 update_memory。\n"
             "update_memory 需要传入 memory_id 和新的 content。只能修改已给出的记忆 ID。\n\n"
+            "注意记忆中出现人物时，务必标注人物的ID，以便后续消息提及时能正确关联。\n\n"
             "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
             "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
@@ -621,15 +622,30 @@ class MyPlugin(Star):
         )
 
         original_prompt = (req.prompt or "").strip() or normalize_message_text(event, self.face_desc_map)
-        memories = await self._get_related_memories(event, original_prompt)
         history_lines = await self._get_recent_history_lines(event)
+        
+        # 汇总当前消息和上下文历史消息进行记忆检索
+        search_query = original_prompt
+        if history_lines:
+            # 提取历史消息中的文本部分（去掉元数据标签）
+            history_texts = []
+            for line in history_lines:
+                # 假设格式是 [nickname/user_id/time] (role)#msgid\ntext
+                parts = line.split("\n", 1)
+                if len(parts) > 1:
+                    history_texts.append(parts[1])
+                else:
+                    history_texts.append(line)
+            search_query = "\n".join(history_texts[-3:]) + "\n" + original_prompt
+
+        memories = await self._get_related_memories(event, search_query)
 
         sections: list[str] = []
         if history_lines:
             sections.append("最近历史消息：\n" + "\n\n".join(history_lines))
         if memories:
             sections.append(
-                "相关记忆（请优先参考）：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
+                "<MEM>相关记忆（请优先参考）：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories) + "</MEM>"
             )
 
         context_prefix = "\n\n".join(sections)
