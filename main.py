@@ -655,23 +655,32 @@ class MyPlugin(Star):
         # 限制最终注入的数量（取配置值）
         memories = memories[:self.memory_recall_count]
 
-        sections: list[str] = []
-        if history_lines:
-            sections.append(" 最近历史消息：\n" + "\n\n".join(history_lines))
-        if memories:
-            sections.append(
-                "<MEM>相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories) + "</MEM>"
-            )
+        # 清理历史上下文中的 <MEM> 块，避免模型受到旧记忆干扰
+        if req.contexts:
+            import re
+            mem_pattern = re.compile(r"<MEM>.*?</MEM>", re.DOTALL)
+            for ctx in req.contexts:
+                content = ctx.get("content", "")
+                if isinstance(content, str) and "<MEM>" in content:
+                    ctx["content"] = mem_pattern.sub("", content).strip()
 
-        context_prefix = "\n\n".join(sections)
+        sections: list[str] = []
+        histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
+        memories_prompt = (
+            "<MEM>相关记忆：\n"
+            + "\n".join(f"[{record.id}] {record.content}" for record in memories)
+            + "</MEM>"
+        )
+
         bot_id = self._get_bot_id(event)
         current_msg_id = getattr(event.message_obj, "message_id", "unknown")
         role_label = " (admin)" if event.is_admin() else "(member)"
         req.prompt = (
-            f"{context_prefix}\n\n"
+            f"{histroy_prompt}\n\n"
             f"你的id是{bot_id}。\n"
             f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
-            f"{original_prompt}"
+            f"{original_prompt}\n\n"
+            f"{memories_prompt}"
             "\n=====\n"
             "注意：若存在不在<MEM>块内但值得记忆的稳定事实、约定，请**务必**调用 add_memory 添加记忆。\n"
             "你**不需要**记录群内发生了什么事，你只需要用户教你事实时调用工具。"
@@ -680,6 +689,7 @@ class MyPlugin(Star):
             "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
             "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息"
             "=====\n"
+            "</MEM>"
         )
 
         logger.info(
