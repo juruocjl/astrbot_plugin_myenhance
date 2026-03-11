@@ -28,8 +28,8 @@ from .flask_ui import start_flask_app
 
 @register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.10")
 class MyPlugin(Star):
-    QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
-    MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
+    QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
+    MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     REFUSE_ONLY_RE = re.compile(r'^\s*<refuse\s*/>\s*$')
 
     def __init__(self, context: Context, config: dict | None = None):
@@ -442,9 +442,9 @@ class MyPlugin(Star):
         if not text:
             return None
 
-        match = self.QUOTE_HEAD_RE.match(text)
+        match = self.QUOTE_HEAD_RE.search(text)
         quote_id = match.group(1).strip() if match else ""
-        body = text[match.end() :] if match else text
+        body = text[:match.start()] + text[match.end() :] if match else text
         touched = bool(match)
         chain: list = []
 
@@ -828,6 +828,12 @@ class MyPlugin(Star):
             "",
             text,
             flags=re.DOTALL | re.IGNORECASE,
+        )
+        text = re.sub(
+            r"</\s*(?:mention|quote)\s*>",
+            "",
+            text,
+            flags=re.IGNORECASE,
         )
         if self.REFUSE_ONLY_RE.match(text):
             result.chain = []
