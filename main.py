@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.8")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.9")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -64,8 +64,20 @@ class MyPlugin(Star):
         )
         self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
+        self._flask_server = None
+        self.stop_flask = None
         if self.web_port > 0:
-            start_flask_app(self, self.web_port)
+            self.stop_flask = start_flask_app(self, self.web_port)
+
+    async def terminate(self) -> None:
+        if self.stop_flask:
+            try:
+                self.stop_flask()
+            except Exception as exc:
+                logger.warning("[myenhance] failed to stop Flask UI: %s", exc)
+            finally:
+                self.stop_flask = None
+                self._flask_server = None
 
     def _build_reply_system_prompt(self) -> str:
         return (

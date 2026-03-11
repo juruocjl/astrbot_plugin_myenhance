@@ -3,13 +3,12 @@ import threading
 from flask import Flask, request, jsonify, render_template_string
 from typing import TYPE_CHECKING
 from astrbot.api import logger
+from werkzeug.serving import make_server
 
 if TYPE_CHECKING:
     from .main import MyPlugin
 
 def start_flask_app(plugin_instance: "MyPlugin", port: int):
-    # 此处也可以添加 print 看看函数是否被调用
-    print(f"[myenhance-debug] Starting Flask app on port {port}")
     app = Flask(__name__)
 
     HTML_TEMPLATE = """
@@ -143,12 +142,33 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
         return jsonify({"success": success, "msg": "删除成功" if success else "删除失败"})
 
     def run():
+        server = make_server('0.0.0.0', port, app)
+        plugin_instance._flask_server = server
         try:
-            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+            server.serve_forever()
         except Exception as e:
             logger.error(f"[myenhance] Flask failed to start: {e}")
+        finally:
+            try:
+                server.server_close()
+            except Exception:
+                pass
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
+
+    def stop_flask():
+        try:
+            server = getattr(plugin_instance, "_flask_server", None)
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+                plugin_instance._flask_server = None
+        except Exception as exc:
+            logger.warning(f"[myenhance] Flask stop failed: {exc}")
+        finally:
+            if thread.is_alive():
+                thread.join(timeout=2)
+            
     logger.info(f"[myenhance] Flask UI started on port {port}")
-    return thread
+    return stop_flask
