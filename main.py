@@ -23,10 +23,10 @@ from .utils.face_map import load_face_desc_map
 from .utils.hybrid_retrieval import hybrid_search
 from .utils.memory_store import MemoryStore
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
-from .pages import register_pages
+from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.4.0")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.0")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -64,7 +64,8 @@ class MyPlugin(Star):
         )
         self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
-        register_pages(self)
+        if self.web_port > 0:
+            start_flask_app(self, self.web_port)
 
     def _build_reply_system_prompt(self) -> str:
         return (
@@ -157,6 +158,12 @@ class MyPlugin(Star):
             self.rrf_k = max(1, int(raw_rrf_k))
         except (TypeError, ValueError):
             self.rrf_k = 60
+
+        raw_web_port = self.config.get("web_port", 6180)
+        try:
+            self.web_port = int(raw_web_port)
+        except (TypeError, ValueError):
+            self.web_port = 6180
 
         logger.debug(
             "[myenhance] config: active_reply=%s prob=%.4f history=%s memory_recall=%s memory_max=%s",

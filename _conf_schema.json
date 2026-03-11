@@ -65,5 +65,10 @@
     "description": "RRF 混合搜索的平滑常数 (k)，决定了排序权重的衰减速度，默认 60",
     "type": "int",
     "default": 60
+  },
+  "web_port": {
+    "description": "管理界面的 Web 端口，设为 0 则禁用",
+    "type": "int",
+    "default": 6180
   }
 }
