@@ -8,6 +8,8 @@ if TYPE_CHECKING:
     from .main import MyPlugin
 
 def start_flask_app(plugin_instance: "MyPlugin", port: int):
+    # 此处也可以添加 print 看看函数是否被调用
+    print(f"[myenhance-debug] Starting Flask app on port {port}")
     app = Flask(__name__)
 
     HTML_TEMPLATE = """
