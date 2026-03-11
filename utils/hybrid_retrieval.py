@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 import math
 import re
+from rank_bm25 import BM25Okapi
 
 from .memory_store import MemoryRecord
 
@@ -37,7 +38,11 @@ def hybrid_search(
         return []
 
     doc_tokens = [tokenize(record.content) for record in records]
-    bm25_scores = _bm25_scores(query_tokens, doc_tokens)
+    
+    # 使用专业的 rank_bm25 库替代手动实现
+    bm25 = BM25Okapi(doc_tokens)
+    bm25_scores = bm25.get_scores(query_tokens)
+    
     final_embedding_scores = embedding_scores
     if final_embedding_scores is None:
         query_vector = _hashed_embedding(normalized_query)
@@ -78,58 +83,48 @@ def tokenize(text: str) -> list[str]:
     lowered = str(text or "").lower()
     base_tokens = TOKEN_RE.findall(lowered)
     joined_cjk = "".join(ch for ch in lowered if "\u4e00" <= ch <= "\u9fff")
-    bigrams = [joined_cjk[index : index + 2] for index in range(len(joined_cjk) - 1)]
+    bigrams = [joined_cjk[i : i + 2] for i in range(len(joined_cjk) - 1)]
     return [token for token in base_tokens + bigrams if token.strip()]
-
-
-def _bm25_scores(query_tokens: list[str], docs_tokens: list[list[str]]) -> list[float]:
-    if not docs_tokens:
-        return []
-
-    avgdl = sum(len(tokens) for tokens in docs_tokens) / max(len(docs_tokens), 1)
-    doc_freq: Counter[str] = Counter()
-    for tokens in docs_tokens:
-        doc_freq.update(set(tokens))
-
-    k1 = 1.5
-    b = 0.75
-    scores: list[float] = []
-    total_docs = len(docs_tokens)
-
-    for tokens in docs_tokens:
-        token_counts = Counter(tokens)
-        doc_len = len(tokens) or 1
-        score = 0.0
-        for token in query_tokens:
-            freq = token_counts.get(token, 0)
-            if freq <= 0:
-                continue
-            df = doc_freq.get(token, 0)
-            idf = math.log(1 + (total_docs - df + 0.5) / (df + 0.5))
-            numerator = freq * (k1 + 1)
-            denominator = freq + k1 * (1 - b + b * doc_len / max(avgdl, 1e-9))
-            score += idf * numerator / denominator
-        scores.append(score)
-    return scores
 
 
 def _hashed_embedding(text: str, dimensions: int = 256) -> list[float]:
     vector = [0.0] * dimensions
     units = tokenize(text)
     condensed = str(text or "").lower().replace(" ", "")
-    units.extend(condensed[index : index + 3] for index in range(max(0, len(condensed) - 2)))
+    units.extend(condensed[i : i + 3] for i in range(max(0, len(condensed) - 2)))
 
     if not units:
         return vector
 
     for unit in units:
         index = hash(unit) % dimensions
-        vector[index] += 1.0
+        idx = index if index >= 0 else index + dimensions
+        vector[idx % dimensions] += 1.0
 
     norm = math.sqrt(sum(value * value for value in vector))
     if norm <= 0:
         return vector
     return [value / norm for value in vector]
+
+
+def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    if len(vec1) != len(vec2):
+        return 0.0
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = math.sqrt(sum(a * a for a in vec1))
+    norm2 = math.sqrt(sum(b * b for b in vec2))
+    if norm1 <= 0 or norm2 <= 0:
+        return 0.0
+    return dot_product / (norm1 * norm2)
+
+
+def _build_ranks(scores: list[float]) -> list[int]:
+    indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+    ranks = [0] * len(scores)
+    for rank, (index, _) in enumerate(indexed, 1):
+        ranks[index] = rank
+    return ranks
+
 
 
 def _cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
