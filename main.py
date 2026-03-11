@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.6")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.7")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'^\s*<quote\s+id="([^"]+)"\s*/>')
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/>')
@@ -699,9 +699,33 @@ class MyPlugin(Star):
             import re
             mem_pattern = re.compile(r"<MEM>.*?</MEM>", re.DOTALL)
             for ctx in req.contexts:
-                content = ctx.get("content", "")
-                if isinstance(content, str) and "<MEM>" in content:
-                    ctx["content"] = mem_pattern.sub("", content).strip()
+                if isinstance(ctx, dict):
+                    content = ctx.get("content")
+                    if isinstance(content, str):
+                        if "<MEM>" in content:
+                            ctx["content"] = mem_pattern.sub("", content).strip()
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text = item.get("text", "")
+                                if isinstance(text, str) and "<MEM>" in text:
+                                    item["text"] = mem_pattern.sub("", text).strip()
+                elif hasattr(ctx, "content"):
+                    content = ctx.content
+                    if isinstance(content, str):
+                        if "<MEM>" in content:
+                            ctx.content = mem_pattern.sub("", content).strip()
+                    elif isinstance(content, list):
+                        for item in content:
+                            if (isinstance(item, dict) and item.get("type") == "text") or \
+                               (hasattr(item, "type") and getattr(item, "type") == "text"):
+                                
+                                text = item.get("text") if isinstance(item, dict) else getattr(item, "text", "")
+                                if isinstance(text, str) and "<MEM>" in text:
+                                    if isinstance(item, dict):
+                                        item["text"] = mem_pattern.sub("", text).strip()
+                                    else:
+                                        setattr(item, "text", mem_pattern.sub("", text).strip())
 
         sections: list[str] = []
         histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
