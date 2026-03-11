@@ -107,10 +107,12 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     def api_list():
         try:
             data = {"scopes": {}}
-            scopes_items = plugin_instance.memory_store.memories_by_scope.items()
+            scopes_items = list(plugin_instance.memory_store.memories_by_scope.items())
+            print(f"[myenhance-debug] Flask /api/list: found {len(scopes_items)} scopes.")
             logger.info(f"[myenhance] Flask /api/list: found {len(scopes_items)} scopes.")
             
             for s_id, records in scopes_items:
+                print(f"[myenhance-debug] Flask /api/list: scope {s_id} has {len(records)} records.")
                 logger.info(f"[myenhance] Flask /api/list: scope {s_id} has {len(records)} records.")
                 data["scopes"][s_id] = [
                     {"id": r.id, "content": r.content, "updated_at": r.updated_at}
@@ -118,6 +120,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 ]
             return jsonify(data)
         except Exception as e:
+            print(f"[myenhance-debug] Error in /api/list: {e}")
             logger.exception(f"[myenhance] Error in /api/list: {e}")
             return jsonify({"scopes": {}, "error": str(e)}), 500
 
