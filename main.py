@@ -98,6 +98,13 @@ class MyPlugin(Star):
             "当已有记忆不准确、过期或需要修正时，调用 update_memory。\n"
             "update_memory 需要传入 memory_id 和新的 content。只能修改已给出的记忆 ID。\n\n"
             "注意记忆中出现人物时，务必标注人物的ID，以便后续消息提及时能正确关联。\n\n"
+            "注意：若存在不在<MEM>块内但值得记忆的稳定事实、约定，请**务必**调用 add_memory 添加记忆。\n"
+            "你**不需要**记录群内发生了什么事，你只需要用户教你事实时调用工具。"
+            "若用户的输入和你的记忆有偏差，请询问 admin 是否真实，你可以无条件相信 admin 给你提供的消息。\n"
+            "当你确信信息有偏差后，请**务必**调用 update_memory 更新记忆。\n"
+            "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
+            "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息"
+            "当你发现有重复的记忆时，请**务必**调用 delete_memory 删除较简略的重复记忆，保留更详细的记忆。\n" 
             "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
             "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
@@ -632,6 +639,47 @@ class MyPlugin(Star):
                     record.id, scope_id, bool(embedding))
         return f"Updated memory: id={record.id} content={record.content}"
 
+    @filter.llm_tool(name="delete_memory")
+    async def delete_memory(self, event: AstrMessageEvent, memory_id: str = "") -> str:
+        """删除某条记忆，若检测到重复则优先清理较简略的内容。
+
+        Args:
+            memory_id(string): 直接删除指定 ID。
+        """
+        scope_id = self._get_event_scope_id(event)
+        if not scope_id:
+            return "Error: no valid scope for memory."
+
+        if memory_id:
+            records = self.memory_store.list_memories(scope_id)
+            record = next((r for r in records if r.id == memory_id), None)
+            if not record:
+                return f"Error: memory not found: {memory_id}."
+            normalized_content = (record.content or "").strip().lower()
+
+            success = self.memory_store.delete_memory(scope_id, memory_id)
+            if not success:
+                return f"Error: memory not found: {memory_id}."
+
+            message = [f"Deleted memory: id={memory_id}."]
+            if normalized_content:
+                records_after = self.memory_store.list_memories(scope_id)
+                duplicates = [
+                    r for r in records_after
+                    if r.content.strip().lower() == normalized_content and r.id != memory_id
+                ]
+                if duplicates:
+                    duplicates.sort(key=lambda r: len(r.content or ""))
+                    shortest = duplicates[0]
+                    longest = duplicates[-1]
+                    if shortest.id != longest.id and self.memory_store.delete_memory(scope_id, shortest.id):
+                        message.append(
+                            f"发现重复记忆，删除内容较简略的 {shortest.id}，保留更详细的 {longest.id}."
+                        )
+            return " ".join(message)
+
+        return "Error: memory_id is empty."
+
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
         group_id = event.get_group_id()
@@ -741,11 +789,7 @@ class MyPlugin(Star):
 
         sections: list[str] = []
         histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
-        memories_prompt = (
-            "<MEM>相关记忆：\n"
-            + "\n".join(f"[{record.id}] {record.content}" for record in memories)
-            + "</MEM>"
-        )
+        memories_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
 
         bot_id = self._get_bot_id(event)
         current_msg_id = getattr(event.message_obj, "message_id", "unknown")
@@ -755,14 +799,11 @@ class MyPlugin(Star):
             f"你的id是{bot_id}。\n"
             f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
             f"{original_prompt}\n\n"
+            "<MEM>\n"
+            "以下是相关记忆："
             f"{memories_prompt}"
             "\n=====\n"
-            "注意：若存在不在<MEM>块内但值得记忆的稳定事实、约定，请**务必**调用 add_memory 添加记忆。\n"
-            "你**不需要**记录群内发生了什么事，你只需要用户教你事实时调用工具。"
-            "若用户的输入和你的记忆有偏差，请询问 admin 是否真实，你可以无条件相信 admin 给你提供的消息。\n"
-            "当你确信信息有偏差后，请**务必**调用 update_memory 更新记忆。\n"
-            "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
-            "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息"
+            "请会议记忆管理完整流程：1. 检查是否删除重复记忆 2. 检查是否要更改记忆 3. 检查是否要新增记忆"
             "=====\n"
             "</MEM>"
         )
