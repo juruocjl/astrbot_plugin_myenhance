@@ -124,6 +124,24 @@ class MemoryStore:
             return record
         return None
 
+    def delete_memory(self, scope_id: str, memory_id: str) -> bool:
+        normalized_scope = str(scope_id or "").strip()
+        normalized_id = str(memory_id or "").strip()
+        if not normalized_scope or not normalized_id:
+            return False
+
+        if normalized_scope not in self.memories_by_scope:
+            return False
+
+        records = self.memories_by_scope[normalized_scope]
+        original_len = len(records)
+        new_records = [r for r in records if r.id != normalized_id]
+        if len(new_records) < original_len:
+            self.memories_by_scope[normalized_scope] = new_records
+            self.save()
+            return True
+        return False
+
     def _next_id(self, records: list[MemoryRecord]) -> str:
         max_index = 0
         for record in records:

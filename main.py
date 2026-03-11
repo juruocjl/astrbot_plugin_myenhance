@@ -23,6 +23,7 @@ from .utils.face_map import load_face_desc_map
 from .utils.hybrid_retrieval import hybrid_search
 from .utils.memory_store import MemoryStore
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
+from .pages import register_pages
 
 
 @register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.4.0")
@@ -63,6 +64,7 @@ class MyPlugin(Star):
         )
         self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
+        register_pages(self)
 
     def _build_reply_system_prompt(self) -> str:
         return (
