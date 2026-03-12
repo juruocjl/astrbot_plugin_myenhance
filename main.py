@@ -256,6 +256,7 @@ class MyPlugin(Star):
                 response = resp.json()
             except ValueError:
                 response = {}
+            logger.info(f"[myenhance] mute request response: {response}")
             success = bool(response.get("success")) or status == 200
             message = response.get("message") or resp.text or "禁言执行完成"
             return success, message
