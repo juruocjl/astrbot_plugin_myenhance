@@ -34,11 +34,15 @@ def hybrid_search(
     if not normalized_query or not records or top_k <= 0:
         return []
 
-    query_tokens = tokenize(normalized_query)
+    learned_terms = _build_learned_terms(normalized_query, records)
+    query_tokens = tokenize(normalized_query, learned_terms=learned_terms)
     if not query_tokens:
         return []
 
-    doc_tokens = [tokenize(record.keyword or record.content) for record in records]
+    doc_tokens = [
+        tokenize(record.keyword or record.content, learned_terms=learned_terms)
+        for record in records
+    ]
     
     # 使用专业的 rank_bm25 库替代手动实现
     bm25 = BM25Okapi(doc_tokens)
@@ -80,14 +84,53 @@ def hybrid_search(
     return merged[:top_k]
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str, learned_terms: set[str] | None = None) -> list[str]:
     lowered = str(text or "").lower()
     base_tokens = TOKEN_RE.findall(lowered)
     joined_cjk = "".join(ch for ch in lowered if "\u4e00" <= ch <= "\u9fff")
     bigrams = [joined_cjk[i : i + 2] for i in range(len(joined_cjk) - 1)]
     pinyin_units = _pinyin_units(joined_cjk)
-    tokens = base_tokens + bigrams + pinyin_units
+    adaptive_tokens = []
+    if learned_terms:
+        for token in base_tokens:
+            adaptive_tokens.extend(_adaptive_alnum_subtokens(token, learned_terms))
+    tokens = base_tokens + bigrams + pinyin_units + adaptive_tokens
     return [token for token in tokens if token.strip()]
+
+
+def _build_learned_terms(query: str, records: list[MemoryRecord]) -> set[str]:
+    learned_terms: set[str] = set()
+    texts = [query]
+    texts.extend((record.keyword or record.content or "") for record in records)
+    for text in texts:
+        lowered = str(text or "").lower()
+        learned_terms.update(_extract_alnum_terms(lowered))
+        joined_cjk = "".join(ch for ch in lowered if "\u4e00" <= ch <= "\u9fff")
+        learned_terms.update(_pinyin_units(joined_cjk))
+    return {term for term in learned_terms if len(term) >= 2}
+
+
+def _extract_alnum_terms(text: str) -> list[str]:
+    return [token for token in TOKEN_RE.findall(text) if len(token) >= 2 and token.isascii()]
+
+
+def _adaptive_alnum_subtokens(token: str, learned_terms: set[str]) -> list[str]:
+    normalized = str(token or "").strip().lower()
+    if len(normalized) < 4 or not normalized.isascii():
+        return []
+    matches: set[str] = set()
+    max_window = min(len(normalized), 8)
+    for start in range(len(normalized)):
+        for size in range(3, max_window + 1):
+            end = start + size
+            if end > len(normalized):
+                break
+            fragment = normalized[start:end]
+            if fragment == normalized:
+                continue
+            if fragment in learned_terms:
+                matches.add(fragment)
+    return sorted(matches)
 
 
 def _pinyin_units(text: str) -> list[str]:
