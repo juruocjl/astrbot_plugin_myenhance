@@ -119,7 +119,7 @@ class MyPlugin(Star):
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
             "语言要求：始终使用聊天室当前主要语言回复。\n"
             "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。\n"
-            "管理员赋予了你禁言人的能力，当你忍无可忍时可以禁言捣乱的人，调用 mute_user，参数 user_id 是要禁言的用户ID，duration 是禁言时长，单位是秒，reason 是禁言理由，一般禁言一分钟警示一下即可。\n"
+            "管理员赋予了你禁言人的能力，当你忍无可忍时可以调用 mute_user 禁言捣乱的人，参数 user_id 是要禁言的用户ID，duration 是禁言时长，单位是秒，reason 是禁言理由，一般禁言一分钟警示一下即可。\n"
         )
 
     def _load_config(self) -> None:
@@ -782,21 +782,22 @@ class MyPlugin(Star):
     async def mute_member(
         self,
         event: AstrMessageEvent,
-        group_id: str = "",
         user_id: str = "",
         duration: int | str = 0,
         reason: str = "",
     ) -> str:
         """使用配置好的管理端接口强制禁言群成员。"""
-        normalized_group = str(group_id or "").strip()
         normalized_user = str(user_id or "").strip()
-        if not normalized_group or not normalized_user:
-            return "Error: group_id 和 user_id 为必填"
+        if not normalized_user:
+            return "Error: user_id 为必填"
+        scope_id = event.get_group_id()
+        if not scope_id:
+            return "Error: 无法确定会话 group_id"
         try:
-            target_group_id = int(normalized_group)
+            target_group_id = int(str(scope_id))
             target_user_id = int(normalized_user)
         except ValueError:
-            return "Error: group_id 和 user_id 必须是数字"
+            return "Error: group_id 或 user_id 非数字"
         try:
             requested_duration = max(0, int(duration))
         except (TypeError, ValueError):
