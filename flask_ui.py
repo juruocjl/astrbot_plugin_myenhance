@@ -50,31 +50,54 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                     html += `<div class="scope-header"><h5>会话: ${scope} <span class="badge bg-secondary">${records.length}</span></h5></div>`;
                     records.forEach(r => {
                         html += `
-                        <div class="card memory-card">
-                            <div class="card-body">
-                                <div class="d-flex justify-content-between">
-                                    <h6 class="card-subtitle mb-2 text-muted">ID: ${r.id} | 更新: ${r.updated_at}</h6>
-                                    <div>
-                                        <button class="btn btn-sm btn-outline-primary" onclick="editMemory('${scope}', '${r.id}', \`${r.content}\`)">编辑</button>
-                                        <button class="btn btn-sm btn-outline-danger" onclick="deleteMemory('${scope}', '${r.id}')">删除</button>
+                            <div class="card memory-card">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between">
+                                        <h6 class="card-subtitle mb-2 text-muted">ID: ${r.id} | 更新: ${r.updated_at}</h6>
+                                        <div>
+                                            <button class="btn btn-sm btn-outline-primary" onclick="editMemory('${scope}', '${r.id}', \`${r.content}\`, \`${r.keyword}\`)">编辑</button>
+                                            <button class="btn btn-sm btn-outline-danger" onclick="deleteMemory('${scope}', '${r.id}')">删除</button>
+                                        </div>
                                     </div>
+                                    <p class="card-text mb-1"><strong>关键词：</strong>${r.keyword || '<span class="text-muted">未设置</span>'}</p>
+                                    <p class="card-text">${r.content}</p>
                                 </div>
-                                <p class="card-text">${r.content}</p>
-                            </div>
-                        </div>`;
+                            </div>`;
                     });
                 }
                 content.innerHTML = html;
             }
 
-            async function editMemory(scope, id, oldContent) {
+            async function editMemory(scope, id, oldContent, oldKeyword) {
+                const keywordInput = prompt('关键词（用于检索的主语）：', oldKeyword || '');
+                if (keywordInput === null) return;
+                const trimmedKeyword = keywordInput.trim();
+                if (!trimmedKeyword) {
+                    alert('关键词不能为空');
+                    return;
+                }
                 const newContent = prompt('修改记忆内容:', oldContent);
-                if (newContent === null || newContent === oldContent) return;
-                
+                if (newContent === null) return;
+                const hasKeywordChange = trimmedKeyword !== (oldKeyword || '').trim();
+                const hasContentChange = newContent !== oldContent;
+                if (!hasKeywordChange && !hasContentChange) return;
+                if (hasContentChange && !newContent.trim()) {
+                    alert('内容不能为空');
+                    return;
+                }
+
+                const payload = {scope, id};
+                if (hasContentChange) {
+                    payload.content = newContent;
+                }
+                if (hasKeywordChange) {
+                    payload.keyword = trimmedKeyword;
+                }
+
                 const resp = await fetch('/api/update', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({scope, id, content: newContent})
+                    body: JSON.stringify(payload),
                 });
                 const res = await resp.json();
                 alert(res.msg);
@@ -111,7 +134,12 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
         
         for s_id, records in scopes_items:
             data["scopes"][s_id] = [
-                {"id": r.id, "content": r.content, "updated_at": r.updated_at}
+                {
+                    "id": r.id,
+                    "content": r.content,
+                    "keyword": getattr(r, "keyword", ""),
+                    "updated_at": r.updated_at,
+                }
                 for r in records
             ]
         return jsonify(data)
@@ -120,7 +148,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     def api_update():
         data = request.json
         success = plugin_instance.memory_store.update_memory(
-            data.get("scope"), data.get("id"), data.get("content")
+            data.get("scope"), data.get("id"), data.get("content"), data.get("keyword")
         )
         return jsonify({"success": bool(success), "msg": "修改成功" if success else "修改失败"})
 

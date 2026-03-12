@@ -103,12 +103,12 @@ class MyPlugin(Star):
             "注意记忆中出现人物时，务必标注人物的ID，以便后续消息提及时能正确关联。\n\n"
             "注意：若存在不在<MEM>块内但值得记忆的稳定事实、约定，请**务必**调用 add_memory 添加记忆。\n"
             "你**不需要**记录群内发生了什么事，你只需要用户教你事实时调用工具。"
-            "一条记忆中是为了解释一个知识，你**不应该**在一条记忆中包含大于1个黑话。\n"
             "若用户的输入和你的记忆有偏差，请询问 admin 是否真实，你可以无条件相信 admin 给你提供的消息。\n"
             "当你确信信息有偏差后，请**务必**调用 update_memory 更新记忆。\n"
             "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
             "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息"
             "当你发现有重复的记忆时，请**务必**调用 delete_memory 删除较简略的重复记忆，保留更详细的记忆。\n" 
+            "你只会将完全确定的信息加入记忆管理库。"
             "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
             "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
@@ -577,15 +577,19 @@ class MyPlugin(Star):
         return text
 
     @filter.llm_tool(name="add_memory")
-    async def add_memory(self, event: AstrMessageEvent, content: str = "") -> str:
+    async def add_memory(self, event: AstrMessageEvent, content: str = "", keyword: str = "") -> str:
         """添加一条可长期复用的记忆。
 
         Args:
             content(string): 需要保存的一句话记忆内容。
+            keyword(string): 关联的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象。
         """
         normalized_content = str(content or "").strip()
+        normalized_keyword = str(keyword or "").strip()
         if not normalized_content:
             return "Error: content is empty."
+        if not normalized_keyword:
+            return "Error: keyword is empty."
 
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
@@ -600,7 +604,12 @@ class MyPlugin(Star):
                 logger.warning("[myenhance] failed to get embedding for new memory: %s", exc)
 
         try:
-            record = self.memory_store.add_memory(scope_id, normalized_content, embedding=embedding)
+            record = self.memory_store.add_memory(
+                scope_id,
+                normalized_content,
+                keyword=normalized_keyword,
+                embedding=embedding,
+            )
         except ValueError as exc:
             return f"Error: {exc}"
 
@@ -609,33 +618,51 @@ class MyPlugin(Star):
         return f"Added memory: id={record.id} content={record.content}"
 
     @filter.llm_tool(name="update_memory")
-    async def update_memory(self, event: AstrMessageEvent, memory_id: str = "", content: str = "") -> str:
+    async def update_memory(
+        self,
+        event: AstrMessageEvent,
+        memory_id: str = "",
+        content: str = "",
+        keyword: str = "",
+    ) -> str:
         """根据记忆 ID 修改已有记忆。
 
         Args:
             memory_id(string): 需要修改的记忆 ID。
-            content(string): 修改后的记忆内容。
+            content(string): 修改后的记忆内容，可留空表示不修改。
+            keyword(string): 修改后的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象。
         """
         normalized_id = str(memory_id or "").strip()
         normalized_content = str(content or "").strip()
+        if normalized_content == "":
+            normalized_content = None
+        normalized_keyword = str(keyword or "").strip()
+        if normalized_keyword == "":
+            normalized_keyword = None
         if not normalized_id:
             return "Error: memory_id is empty."
-        if not normalized_content:
-            return "Error: content is empty."
+        if normalized_content is None and normalized_keyword is None:
+            return "Error: nothing to update."
 
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
             return "Error: no valid scope for memory."
 
         embedding = None
-        provider = self._get_embedding_provider()
-        if provider:
+        provider = self._get_embedding_provider() if normalized_content is not None else None
+        if provider and normalized_content is not None:
             try:
                 embedding = await provider.get_embedding(normalized_content)
             except Exception as exc:
                 logger.warning("[myenhance] failed to get embedding for updated memory: %s", exc)
 
-        record = self.memory_store.update_memory(scope_id, normalized_id, normalized_content, embedding=embedding)
+        record = self.memory_store.update_memory(
+            scope_id,
+            normalized_id,
+            normalized_content,
+            keyword=normalized_keyword,
+            embedding=embedding,
+        )
         if not record:
             return f"Error: memory not found: {normalized_id}"
 

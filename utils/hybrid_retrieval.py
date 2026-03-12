@@ -37,7 +37,7 @@ def hybrid_search(
     if not query_tokens:
         return []
 
-    doc_tokens = [tokenize(record.content) for record in records]
+    doc_tokens = [tokenize(record.keyword or record.content) for record in records]
     
     # 使用专业的 rank_bm25 库替代手动实现
     bm25 = BM25Okapi(doc_tokens)
