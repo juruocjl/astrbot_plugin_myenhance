@@ -1,4 +1,5 @@
 astrbot>=4.19.2
 flask
+httpx
 rank_bm25
 pypinyin

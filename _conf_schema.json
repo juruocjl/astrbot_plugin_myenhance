@@ -69,5 +69,20 @@
     "description": "管理界面的 Web 端口，设为 0 则禁用",
     "type": "int",
     "default": 6180
+  },
+  "mod_api_url": {
+    "description": "可选：管理端 API 地址（例如 https://admin.example.com），通过插件配置提供",
+    "type": "string",
+    "default": ""
+  },
+  "mod_auth_token": {
+    "description": "可选：管理端认证 token，用于 /api/mod/mute 调用",
+    "type": "string",
+    "default": ""
+  },
+  "mod_max_mute_duration": {
+    "description": "可选：单次禁言时长上限（秒），默认 0 表示不限制",
+    "type": "int",
+    "default": 0
   }
 }

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict, defaultdict, deque
+import json
 import math
-from pathlib import Path
 import random
 import re
-from typing import Deque
 import uuid
+from collections import OrderedDict, defaultdict, deque
+from pathlib import Path
+from typing import Deque
+from urllib.parse import urljoin
+
+import httpx
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -114,7 +118,8 @@ class MyPlugin(Star):
             "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
             "语言要求：始终使用聊天室当前主要语言回复。\n"
-            "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。"
+            "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。\n"
+            "管理员赋予了你禁言人的能力，当你忍无可忍时可以禁言捣乱的人，调用 mute_user，参数 user_id 是要禁言的用户ID，duration 是禁言时长，单位是秒，reason 是禁言理由，一般禁言一分钟警示一下即可。\n"
         )
 
     def _load_config(self) -> None:
@@ -190,6 +195,14 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             self.web_port = 6180
 
+        self.mod_api_url = str(self.config.get("mod_api_url") or "").strip()
+        self.mod_auth_token = str(self.config.get("mod_auth_token") or "").strip()
+        raw_mod_max = self.config.get("mod_max_mute_duration", 0)
+        try:
+            self.mod_max_mute_duration = max(0, int(raw_mod_max))
+        except (TypeError, ValueError):
+            self.mod_max_mute_duration = 0
+
         logger.debug(
             "[myenhance] config: active_reply=%s prob=%.4f history=%s memory_recall=%s memory_max=%s",
             self.active_reply_enable,
@@ -205,6 +218,54 @@ class MyPlugin(Star):
             lock = asyncio.Lock()
             self.group_history_locks[group_id] = lock
         return lock
+
+    def _compose_mute_payload(
+        self,
+        group_id: int,
+        user_id: int,
+        duration: int,
+        reason: str,
+    ) -> dict[str, int | str]:
+        payload: dict[str, int | str] = {
+            "groupId": group_id,
+            "userId": user_id,
+            "duration": max(0, duration),
+            "reason": reason or "由 MyEnhance 管理工具触发",
+        }
+        if self.mod_auth_token:
+            payload["authToken"] = self.mod_auth_token
+        return payload
+
+    async def _send_mute_request(self, payload: dict) -> tuple[bool, str]:
+        base_url = str(self.mod_api_url or "").strip()
+        if not base_url:
+            return False, "未配置 mod_api_url"
+        endpoint = urljoin(base_url.rstrip("/") + "/", "/api/mod/mute")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self.mod_auth_token:
+            headers["Authorization"] = f"Bearer {self.mod_auth_token}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(endpoint, json=payload, headers=headers)
+                resp.raise_for_status()
+            status = resp.status_code
+            try:
+                response = resp.json()
+            except ValueError:
+                response = {}
+            success = bool(response.get("success")) or status == 200
+            message = response.get("message") or resp.text or "禁言执行完成"
+            return success, message
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text
+            return False, f"禁言调用失败：{exc.response.status_code} {exc}\n{body}"
+        except httpx.HTTPError as exc:
+            return False, f"禁言调用失败：{exc}"
+        except Exception as exc:
+            return False, f"禁言调用异常：{exc}"
 
     def _get_event_scope_id(self, event: AstrMessageEvent) -> str:
         return str(event.get_group_id() or event.unified_msg_origin or "").strip()
@@ -717,6 +778,41 @@ class MyPlugin(Star):
 
         return "Error: memory_id is empty."
 
+    @filter.llm_tool(name="mute_member")
+    async def mute_member(
+        self,
+        event: AstrMessageEvent,
+        group_id: str = "",
+        user_id: str = "",
+        duration: int | str = 0,
+        reason: str = "",
+    ) -> str:
+        """使用配置好的管理端接口强制禁言群成员。"""
+        normalized_group = str(group_id or "").strip()
+        normalized_user = str(user_id or "").strip()
+        if not normalized_group or not normalized_user:
+            return "Error: group_id 和 user_id 为必填"
+        try:
+            target_group_id = int(normalized_group)
+            target_user_id = int(normalized_user)
+        except ValueError:
+            return "Error: group_id 和 user_id 必须是数字"
+        try:
+            requested_duration = max(0, int(duration))
+        except (TypeError, ValueError):
+            requested_duration = 0
+        if self.mod_max_mute_duration > 0 and requested_duration > self.mod_max_mute_duration:
+            requested_duration = self.mod_max_mute_duration
+        reason_text = str(reason or "").strip() or "由 MyEnhance 管理工具触发"
+        payload = self._compose_mute_payload(
+            target_group_id,
+            target_user_id,
+            requested_duration,
+            reason_text,
+        )
+        success, message = await self._send_mute_request(payload)
+        return message if success else f"Error: {message}"
+
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def record_group_message(self, event: AstrMessageEvent):
         group_id = event.get_group_id()
@@ -841,8 +937,10 @@ class MyPlugin(Star):
             "以下是相关记忆："
             f"{memories_prompt}"
             "\n=====\n"
-            "请会议记忆管理完整流程：1. 检查是否删除重复记忆或错误记忆 2. 检查是否要更改记忆，没有改动请不要调用 3. 检查是否要新增记忆\n"
-            "注意如果你选择先更改记忆，那么不应该输出任何内容来回复消息，当工具调用完成再进行回复。\n"
+            "请回忆记忆管理完整流程：1. 检查是否删除重复记忆或错误记忆 2. 检查是否要更改记忆，没有改动请不要调用 3. 检查是否要新增记忆\n"
+            "如果是待确认的内容，你**不应该调用任何工具**更改记忆。\n"
+            "注意如果你选择先更改记忆，那么**不应该输出任何内容**来回复消息，当工具调用完成再进行回复。\n"
+            "如果你已经回复过，那么你**禁止**再回复相同内容。\n"
             "所有关键词都应当是指代同一对象的不同说法。\n"
             "=====\n"
             "</MEM>"
