@@ -301,14 +301,19 @@ class MyPlugin(Star):
             if not history:
                 return [], ""
             
+            remaining_items = []
             for item_ts, item_msg_id, line in history:
-                if item_ts <= current_event_ts and item_msg_id != current_msg_id:
-                    # 提取实际文本部分用于检索关键词
-                    parts = line.split("\n", 1)
-                    text = parts[1] if len(parts) > 1 else line
-                    search_lines.append(text)
-                    history_lines.append(line)
-        
+                if item_ts <= current_event_ts:
+                    if item_msg_id != current_msg_id:
+                        # 提取实际文本部分用于检索关键词
+                        parts = line.split("\n", 1)
+                        text = parts[1] if len(parts) > 1 else line
+                        search_lines.append(text)
+                history_lines.append(line)
+                if item_ts > current_event_ts:
+                    remaining_items.append((item_ts, item_msg_id, line))
+            history.clear()
+            history.extend(remaining_items)
         inject_lines = history_lines[-self.history_inject_count :] if self.history_inject_count > 0 else []
         search_query = "\n".join(search_lines)
         return inject_lines, search_query
@@ -761,13 +766,14 @@ class MyPlugin(Star):
             else self.reply_system_prompt_cn
         )
 
-        original_prompt = normalize_message_text(event, self.face_desc_map)
+        original_prompt = self._format_member_message(event)
         
         # 获取用于注入的历史消息和用于检索的全部消息文本
         history_lines, all_history_text = await self._get_recent_history_lines(event)
         
         # 1. 优先检索当前消息相关的记忆
-        current_memories = await self._get_related_memories(event, f"[{event.get_sender_id()}] "+original_prompt)
+        logger.debug(f"[myenhance] retrieving related memories for current message with query: [{event.get_sender_id()}] {event.message_str}")
+        current_memories = await self._get_related_memories(event, f"[{event.get_sender_id()}] {event.message_str}")
         
         # 2. 检索历史背景相关的记忆
         context_memories = []

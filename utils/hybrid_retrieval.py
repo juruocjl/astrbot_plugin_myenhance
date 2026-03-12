@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import math
 import re
 from rank_bm25 import BM25Okapi
+from pypinyin import lazy_pinyin, Style
 
 from .memory_store import MemoryRecord
 
@@ -84,7 +85,23 @@ def tokenize(text: str) -> list[str]:
     base_tokens = TOKEN_RE.findall(lowered)
     joined_cjk = "".join(ch for ch in lowered if "\u4e00" <= ch <= "\u9fff")
     bigrams = [joined_cjk[i : i + 2] for i in range(len(joined_cjk) - 1)]
-    return [token for token in base_tokens + bigrams if token.strip()]
+    pinyin_units = _pinyin_units(joined_cjk)
+    tokens = base_tokens + bigrams + pinyin_units
+    return [token for token in tokens if token.strip()]
+
+
+def _pinyin_units(text: str) -> list[str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    units = lazy_pinyin(cleaned, style=Style.NORMAL, errors="ignore")
+    normalized = [unit for unit in units if unit]
+    if not normalized:
+        return []
+    acronym = "".join(unit[0] for unit in normalized if unit)
+    pinyin_bigrams = ["".join(normalized[i : i + 2]) for i in range(len(normalized) - 1)] if len(normalized) > 1 else []
+    extras = [acronym] if acronym else []
+    return normalized + pinyin_bigrams + extras
 
 
 def _hashed_embedding(text: str, dimensions: int = 256) -> list[float]:
