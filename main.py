@@ -828,14 +828,14 @@ class MyPlugin(Star):
         self,
         event: AstrMessageEvent,
         user_id: str = "",
-        duration: int | str = 0,
+        duration: int = 0,
         reason: str = "",
     ) -> str:
         """使用配置好的管理端接口强制禁言群成员。
         
         Args:
             user_id(string): 需要禁言的用户 ID。
-            duration(number or string): 禁言时长（秒）
+            duration(number): 禁言时长（秒）
             reason(string): 禁言理由。
         """
         normalized_user = str(user_id or "").strip()
