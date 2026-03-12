@@ -108,7 +108,8 @@ class MyPlugin(Star):
             "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
             "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息"
             "当你发现有重复的记忆时，或者有和你当前确认的消息不一致的记忆时，请**务必**调用 delete_memory 删除较简略的重复记忆，保留更详细的记忆。\n" 
-            "你只会将完全确定的信息加入记忆管理库。"
+            "你只会将完全确定的信息加入记忆管理库。\n"
+            "keyword是用来检索的关键词，因此在编写 keyword 时使用空格分隔，所有关键词应当指代同一对象，也就是这条记忆的主体。\n"
             "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
             "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
@@ -587,7 +588,7 @@ class MyPlugin(Star):
 
         Args:
             content(string): 需要保存的一句话记忆内容。
-            keyword(string): 关联的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象。
+            keyword(string): 关联的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象，所有关键词应当指代同一对象。
         """
         normalized_content = str(content or "").strip()
         normalized_keyword = str(keyword or "").strip()
@@ -635,7 +636,7 @@ class MyPlugin(Star):
         Args:
             memory_id(string): 需要修改的记忆 ID。
             content(string): 修改后的记忆内容，可留空表示不修改。
-            keyword(string): 修改后的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象。
+            keyword(string): 修改后的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象，所有关键词应当指代同一对象。
         """
         normalized_id = str(memory_id or "").strip()
         normalized_content = str(content or "").strip()
@@ -842,6 +843,7 @@ class MyPlugin(Star):
             "\n=====\n"
             "请会议记忆管理完整流程：1. 检查是否删除重复记忆或错误记忆 2. 检查是否要更改记忆，没有改动请不要调用 3. 检查是否要新增记忆\n"
             "注意如果你选择先更改记忆，那么不应该输出任何内容来回复消息，当工具调用完成再进行回复。\n"
+            "所有关键词都应当是指代同一对象的不同说法。\n"
             "=====\n"
             "</MEM>"
         )
