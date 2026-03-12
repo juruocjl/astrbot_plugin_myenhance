@@ -35,6 +35,19 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
         </div>
 
         <script>
+            function escapeHtml(value = "") {
+                return String(value)
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
+            }
+
+            function escapeAttr(value = "") {
+                return escapeHtml(value)
+                    .replace(/\"/g, "&quot;")
+                    .replace(/'/g, "&#39;");
+            }
+
             async function loadMemories() {
                 const resp = await fetch('/api/list');
                 const data = await resp.json();
@@ -47,20 +60,30 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
 
                 let html = '';
                 for (const [scope, records] of Object.entries(data.scopes)) {
-                    html += `<div class="scope-header"><h5>会话: ${scope} <span class="badge bg-secondary">${records.length}</span></h5></div>`;
+                    const safeScope = escapeHtml(scope);
+                    html += `<div class="scope-header"><h5>会话: ${safeScope} <span class="badge bg-secondary">${records.length}</span></h5></div>`;
                     records.forEach(r => {
+                        const rawContent = r.content ?? '';
+                        const rawKeyword = r.keyword ?? '';
+                        const safeContent = escapeHtml(rawContent);
+                        const safeKeyword = escapeHtml(rawKeyword);
+                        const keywordDisplay = rawKeyword ? safeKeyword : '<span class="text-muted">未设置</span>';
+                        const scopeAttr = escapeAttr(scope);
+                        const idAttr = escapeAttr(r.id ?? '');
+                        const contentData = encodeURIComponent(rawContent);
+                        const keywordData = encodeURIComponent(rawKeyword);
                         html += `
                             <div class="card memory-card">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between">
-                                        <h6 class="card-subtitle mb-2 text-muted">ID: ${r.id} | 更新: ${r.updated_at}</h6>
+                                        <h6 class="card-subtitle mb-2 text-muted">ID: ${escapeHtml(r.id)} | 更新: ${escapeHtml(r.updated_at)}</h6>
                                         <div>
-                                            <button class="btn btn-sm btn-outline-primary" onclick="editMemory('${scope}', '${r.id}', \`${r.content}\`, \`${r.keyword}\`)">编辑</button>
-                                            <button class="btn btn-sm btn-outline-danger" onclick="deleteMemory('${scope}', '${r.id}')">删除</button>
+                                            <button class="btn btn-sm btn-outline-primary" data-scope="${scopeAttr}" data-id="${idAttr}" data-content="${contentData}" data-keyword="${keywordData}" onclick="editMemory(this)">编辑</button>
+                                            <button class="btn btn-sm btn-outline-danger" data-scope="${scopeAttr}" data-id="${idAttr}" onclick="deleteMemory(this)">删除</button>
                                         </div>
                                     </div>
-                                    <p class="card-text mb-1"><strong>关键词：</strong>${r.keyword || '<span class="text-muted">未设置</span>'}</p>
-                                    <p class="card-text">${r.content}</p>
+                                    <p class="card-text mb-1"><strong>关键词：</strong>${keywordDisplay}</p>
+                                    <p class="card-text">${safeContent}</p>
                                 </div>
                             </div>`;
                     });
@@ -68,7 +91,15 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 content.innerHTML = html;
             }
 
-            async function editMemory(scope, id, oldContent, oldKeyword) {
+            async function editMemory(button) {
+                const scope = button?.dataset?.scope;
+                const id = button?.dataset?.id;
+                if (!scope || !id) {
+                    alert('编辑目标信息缺失');
+                    return;
+                }
+                const oldContent = decodeURIComponent(button.dataset.content || '');
+                const oldKeyword = decodeURIComponent(button.dataset.keyword || '');
                 const keywordInput = prompt('关键词（用于检索的主语）：', oldKeyword || '');
                 if (keywordInput === null) return;
                 const trimmedKeyword = keywordInput.trim();
@@ -104,7 +135,13 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 loadMemories();
             }
 
-            async function deleteMemory(scope, id) {
+            async function deleteMemory(button) {
+                const scope = button?.dataset?.scope;
+                const id = button?.dataset?.id;
+                if (!scope || !id) {
+                    alert('删除目标信息缺失');
+                    return;
+                }
                 if (!confirm('确定要删除这条记忆吗？')) return;
                 
                 const resp = await fetch('/api/delete', {
