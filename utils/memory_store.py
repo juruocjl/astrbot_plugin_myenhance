@@ -12,6 +12,7 @@ from astrbot.api import logger
 class MemoryRecord:
     id: str
     content: str
+    keyword: str
     created_at: str
     updated_at: str
     embedding: list[float] | None = None
@@ -56,13 +57,17 @@ class MemoryStore:
                 embedding = item.get("embedding")
                 if not isinstance(embedding, list):
                     embedding = None
-                
+
+                keyword = str(item.get("keyword") or "").strip()
                 if not memory_id or not content:
                     continue
+                if not keyword:
+                    keyword = content
                 records.append(
                     MemoryRecord(
                         id=memory_id,
                         content=content,
+                        keyword=keyword,
                         created_at=created_at or self._now_iso(),
                         updated_at=updated_at or self._now_iso(),
                         embedding=embedding,
@@ -92,19 +97,29 @@ class MemoryStore:
     def list_memories(self, scope_id: str) -> list[MemoryRecord]:
         return list(self.memories_by_scope.get(scope_id, []))
 
-    def add_memory(self, scope_id: str, content: str, embedding: list[float] | None = None) -> MemoryRecord:
+    def add_memory(
+        self,
+        scope_id: str,
+        content: str,
+        keyword: str | None = None,
+        embedding: list[float] | None = None,
+    ) -> MemoryRecord:
         normalized_scope = str(scope_id or "").strip()
         normalized_content = str(content or "").strip()
+        normalized_keyword = str(keyword or "").strip()
         if not normalized_scope:
             raise ValueError("scope_id is empty")
         if not normalized_content:
             raise ValueError("content is empty")
+        if not normalized_keyword:
+            raise ValueError("keyword is empty")
 
         records = self.memories_by_scope.setdefault(normalized_scope, [])
         now = self._now_iso()
         record = MemoryRecord(
             id=self._next_id(records),
             content=normalized_content,
+            keyword=normalized_keyword,
             created_at=now,
             updated_at=now,
             embedding=embedding,
@@ -115,19 +130,39 @@ class MemoryStore:
         self.save()
         return record
 
-    def update_memory(self, scope_id: str, memory_id: str, content: str, embedding: list[float] | None = None) -> MemoryRecord | None:
+    def update_memory(
+        self,
+        scope_id: str,
+        memory_id: str,
+        content: str | None = None,
+        keyword: str | None = None,
+        embedding: list[float] | None = None,
+    ) -> MemoryRecord | None:
         normalized_scope = str(scope_id or "").strip()
         normalized_id = str(memory_id or "").strip()
-        normalized_content = str(content or "").strip()
-        if not normalized_scope or not normalized_id or not normalized_content:
+        normalized_content = None
+        if content is not None:
+            normalized_content = str(content or "").strip() or None
+        normalized_keyword = None
+        if keyword is not None:
+            normalized_keyword = str(keyword or "").strip()
+            if not normalized_keyword:
+                return None
+        if not normalized_scope or not normalized_id:
+            return None
+        if normalized_content is None and normalized_keyword is None and embedding is None:
             return None
 
         for record in self.memories_by_scope.get(normalized_scope, []):
             if record.id != normalized_id:
                 continue
-            record.content = normalized_content
+            if normalized_content is not None:
+                record.content = normalized_content
             record.updated_at = self._now_iso()
-            record.embedding = embedding
+            if normalized_keyword is not None:
+                record.keyword = normalized_keyword
+            if embedding is not None:
+                record.embedding = embedding
             self.save()
             return record
         return None
