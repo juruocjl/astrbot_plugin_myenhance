@@ -267,6 +267,50 @@ class MyPlugin(Star):
         except Exception as exc:
             return False, f"禁言调用异常：{exc}"
 
+
+    @filter.command("ban")
+    async def ban_command(
+        self,
+        event: AstrMessageEvent,
+        target: str = "",
+        duration: int = 60,
+        reason: str = "",
+    ):
+        """管理员专用 ban 指令，参数自动解析。
+
+        Args:
+            target(string): 目标用户 ID 或 mention。
+            duration(number): 禁言时长（秒），默认 60。
+            reason(string): 禁言理由。
+        """
+        if not event.is_admin():
+            yield event.make_result().message("ban命令仅限管理员使用。")
+            return
+
+        normalized_target = str(target or "").strip()
+        if not normalized_target:
+            yield event.make_result().message("ban命令需要指定被禁言的用户。")
+            return
+        if not normalized_target.isdigit():
+            yield event.make_result().message("ban命令的用户ID必须为数字。")
+            return
+
+        try:
+            requested_duration = max(0, int(duration))
+        except (TypeError, ValueError):
+            requested_duration = 60
+
+        reason_text = str(reason or "").strip()
+        payload_reason = reason_text or "管理员 ban 命令"
+
+        response = await self.mute_member(
+            event,
+            user_id=normalized_target,
+            duration=requested_duration,
+            reason=payload_reason,
+        )
+        yield event.make_result().message(response)
+
     def _get_event_scope_id(self, event: AstrMessageEvent) -> str:
         return str(event.get_group_id() or event.unified_msg_origin or "").strip()
 
