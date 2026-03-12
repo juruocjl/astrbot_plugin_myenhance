@@ -767,7 +767,7 @@ class MyPlugin(Star):
         history_lines, all_history_text = await self._get_recent_history_lines(event)
         
         # 1. 优先检索当前消息相关的记忆
-        current_memories = await self._get_related_memories(event, original_prompt)
+        current_memories = await self._get_related_memories(event, f"[{event.get_sender_id()}] "+original_prompt)
         
         # 2. 检索历史背景相关的记忆
         context_memories = []
@@ -820,7 +820,7 @@ class MyPlugin(Star):
 
         sections: list[str] = []
         histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
-        memories_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
+        memories_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in memories)
 
         bot_id = self._get_bot_id(event)
         current_msg_id = getattr(event.message_obj, "message_id", "unknown")
