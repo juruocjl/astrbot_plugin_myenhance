@@ -26,7 +26,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.10")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.11")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -65,6 +65,7 @@ class MyPlugin(Star):
         self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
         self._flask_server = None
+        self._flask_thread = None
         self.stop_flask = None
         if self.web_port > 0:
             self.stop_flask = start_flask_app(self, self.web_port)
@@ -78,6 +79,7 @@ class MyPlugin(Star):
             finally:
                 self.stop_flask = None
                 self._flask_server = None
+                self._flask_thread = None
 
     def _build_reply_system_prompt(self) -> str:
         return (
@@ -86,6 +88,7 @@ class MyPlugin(Star):
             "第二步：根据上下文回复消息。请优先引用要回复的消息。若可从上下文中确定目标消息 ID，使用 <quote id=\"msg_id\"/> 并且必须放在输出最开头。\n"
             "每次只能引用一条消息。\n\n"
             "当需要提及用户时，使用 <mention id=\"user_id\"/>，可提及多个用户。\n"
+            "注意你不应该直接输出用户ID，要提到用户时必须使用 mention 标签，且 mention 标签必须包含 id 属性，id 的值为用户ID。\n"
             "user_id 可从消息格式 [nickname/user_id/time] 中提取。\n"
             "mention 不是容器标签，绝对不要输出 </mention>。\n\n"
             "quote 不是容器标签，绝对不要输出 </quote>。\n"

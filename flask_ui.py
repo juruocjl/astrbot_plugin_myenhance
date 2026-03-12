@@ -106,24 +106,15 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
 
     @app.route('/api/list')
     def api_list():
-        try:
-            data = {"scopes": {}}
-            scopes_items = list(plugin_instance.memory_store.memories_by_scope.items())
-            print(f"[myenhance-debug] Flask /api/list: found {len(scopes_items)} scopes.")
-            logger.info(f"[myenhance] Flask /api/list: found {len(scopes_items)} scopes.")
-            
-            for s_id, records in scopes_items:
-                print(f"[myenhance-debug] Flask /api/list: scope {s_id} has {len(records)} records.")
-                logger.info(f"[myenhance] Flask /api/list: scope {s_id} has {len(records)} records.")
-                data["scopes"][s_id] = [
-                    {"id": r.id, "content": r.content, "updated_at": r.updated_at}
-                    for r in records
-                ]
-            return jsonify(data)
-        except Exception as e:
-            print(f"[myenhance-debug] Error in /api/list: {e}")
-            logger.exception(f"[myenhance] Error in /api/list: {e}")
-            return jsonify({"scopes": {}, "error": str(e)}), 500
+        data = {"scopes": {}}
+        scopes_items = list(plugin_instance.memory_store.memories_by_scope.items())
+        
+        for s_id, records in scopes_items:
+            data["scopes"][s_id] = [
+                {"id": r.id, "content": r.content, "updated_at": r.updated_at}
+                for r in records
+            ]
+        return jsonify(data)
 
     @app.route('/api/update', methods=['POST'])
     def api_update():
@@ -141,34 +132,59 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
         )
         return jsonify({"success": success, "msg": "删除成功" if success else "删除失败"})
 
+    server = make_server('0.0.0.0', port, app)
+    plugin_instance._flask_server = server
+
     def run():
-        server = make_server('0.0.0.0', port, app)
-        plugin_instance._flask_server = server
         try:
             server.serve_forever()
         except Exception as e:
             logger.error(f"[myenhance] Flask failed to start: {e}")
         finally:
+            logger.info("[myenhance] Flask server thread exiting")
             try:
                 server.server_close()
             except Exception:
                 pass
+            plugin_instance._flask_server = None
+            plugin_instance._flask_thread = None
 
     thread = threading.Thread(target=run, daemon=True)
+    plugin_instance._flask_thread = thread
     thread.start()
 
     def stop_flask():
+        logger.info("[myenhance] stop_flask called")
         try:
             server = getattr(plugin_instance, "_flask_server", None)
+            thread = getattr(plugin_instance, "_flask_thread", None)
+            logger.info(
+                "[myenhance] stop_flask state: server_exists=%s thread_exists=%s thread_alive=%s",
+                server is not None,
+                thread is not None,
+                bool(thread is not None and thread.is_alive()),
+            )
             if server is not None:
+                logger.info("[myenhance] stopping Flask server")
                 server.shutdown()
-                server.server_close()
-                plugin_instance._flask_server = None
+                logger.info("[myenhance] Flask server shutdown signal sent")
+            else:
+                logger.warning("[myenhance] stop_flask skipped: _flask_server is None")
         except Exception as exc:
             logger.warning(f"[myenhance] Flask stop failed: {exc}")
         finally:
-            if thread.is_alive():
+            if thread is not None and thread.is_alive():
+                logger.info("[myenhance] waiting for Flask thread to exit")
                 thread.join(timeout=2)
+                logger.info(
+                    "[myenhance] Flask thread join finished: still_alive=%s",
+                    thread.is_alive(),
+                )
+            elif thread is None:
+                logger.warning("[myenhance] stop_flask skipped thread join: _flask_thread is None")
+            plugin_instance._flask_server = None
+            plugin_instance._flask_thread = None
+            logger.info("[myenhance] Flask shutdown state cleared")
             
     logger.info(f"[myenhance] Flask UI started on port {port}")
     return stop_flask
