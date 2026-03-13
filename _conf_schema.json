@@ -75,16 +75,6 @@
     "type": "int",
     "default": 500
   },
-  "system_memory_inject_count": {
-    "description": "注入到 system_prompt 的最近记忆数量",
-    "type": "int",
-    "default": 3
-  },
-  "system_memory_cache_size": {
-    "description": "系统记忆池保存的归档条数上限",
-    "type": "int",
-    "default": 12
-  },
   "memory_recall_count": {
     "description": "每次向 user_prompt 注入多少条与当前询问相关的记忆",
     "type": "int",
@@ -94,6 +84,11 @@
     "description": "每个会话范围最多持久化多少条记忆",
     "type": "int",
     "default": 500
+  },
+  "bm25_weight": {
+    "description": "混合检索中 BM25 权重（0.0-1.0），其余权重会分配给 embedding",
+    "type": "float",
+    "default": 0.55
   },
   "rrf_k": {
     "description": "RRF 混合搜索的平滑常数 (k)，决定了排序权重的衰减速度，默认 60",

@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.3")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.4")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -176,18 +176,6 @@ class MyPlugin(Star):
         keep_after = min(keep_after, self.context_user_limit)
         self.context_user_keep_after = keep_after
 
-        raw_system_memory_inject_count = self.config.get("system_memory_inject_count", 3)
-        try:
-            self.system_memory_inject_count = max(0, int(raw_system_memory_inject_count))
-        except (TypeError, ValueError):
-            self.system_memory_inject_count = 3
-
-        raw_system_memory_cache_size = self.config.get("system_memory_cache_size", 12)
-        try:
-            self.system_memory_cache_size = max(1, int(raw_system_memory_cache_size))
-        except (TypeError, ValueError):
-            self.system_memory_cache_size = 12
-
         raw_memory_recall_count = self.config.get("memory_recall_count", 3)
         try:
             self.memory_recall_count = max(0, int(raw_memory_recall_count))
@@ -199,6 +187,13 @@ class MyPlugin(Star):
             self.memory_max_records = max(1, int(raw_memory_max_records))
         except (TypeError, ValueError):
             self.memory_max_records = 500
+
+        raw_bm25_weight = self.config.get("bm25_weight", 0.55)
+        try:
+            self.bm25_weight = min(max(float(raw_bm25_weight), 0.0), 1.0)
+        except (TypeError, ValueError):
+            self.bm25_weight = 0.55
+        self.embedding_weight = 1.0 - self.bm25_weight
 
         raw_jargon_max_records = self.config.get("jargon_max_records", 500)
         try:
@@ -241,10 +236,10 @@ class MyPlugin(Star):
             "history_inject_count": self.history_inject_count,
             "context_user_limit": self.context_user_limit,
             "context_user_keep_after": self.context_user_keep_after,
-            "system_memory_inject_count": self.system_memory_inject_count,
-            "system_memory_cache_size": self.system_memory_cache_size,
             "memory_recall_count": self.memory_recall_count,
             "memory_max_records": self.memory_max_records,
+            "bm25_weight": self.bm25_weight,
+            "embedding_weight": self.embedding_weight,
             "jargon_max_records": self.jargon_max_records,
             "rrf_k": self.rrf_k,
             "web_port": self.web_port,
@@ -527,11 +522,53 @@ class MyPlugin(Star):
             parts.append(f"{role.capitalize()}: {text}")
         return "\n".join(parts)
 
+    def _extract_summary_keyword_content(self, raw_text: str) -> tuple[str, str] | None:
+        payload = str(raw_text or "").strip()
+        if not payload:
+            return None
+
+        candidates: list[str] = []
+
+        # 优先提取 markdown 代码块中的 JSON。
+        fenced_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+        for match in fenced_pattern.finditer(payload):
+            block = (match.group(1) or "").strip()
+            if block:
+                candidates.append(block)
+
+        # 兜底：尝试直接解析全文。
+        candidates.append(payload)
+
+        # 再兜底：提取文本里的 JSON 对象片段。
+        json_object_pattern = re.compile(r"\{[\s\S]*?\}")
+        for match in json_object_pattern.finditer(payload):
+            frag = (match.group(0) or "").strip()
+            if frag:
+                candidates.append(frag)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                data = json.loads(candidate)
+            except Exception:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+            keyword = re.sub(r"\s+", " ", str(data.get("keyword") or "").strip())
+            content = re.sub(r"\s+", " ", str(data.get("content") or "").strip())
+            if content:
+                return keyword, content
+        return None
+
     async def _summarize_context_blocks(
         self,
         event: AstrMessageEvent,
         contexts: list[Any],
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
         if not contexts or not self.summary_prompt_template:
             return None
 
@@ -559,8 +596,19 @@ class MyPlugin(Star):
             return None
 
         text = (getattr(response, "completion_text", "") or "").strip()
-        text = self._shorten_memory_summary(text)
-        return text or None
+        parsed = self._extract_summary_keyword_content(text)
+        if parsed is None:
+            shortened = self._shorten_memory_summary(text)
+            if not shortened:
+                return None
+            return self._build_memory_keyword(shortened), shortened
+
+        keyword, content = parsed
+        shortened = self._shorten_memory_summary(content)
+        if not shortened:
+            return None
+        final_keyword = keyword or self._build_memory_keyword(shortened)
+        return final_keyword, shortened
 
     def _shorten_memory_summary(self, summary_text: str, max_chars: int = 120) -> str:
         normalized = re.sub(r"\s+", " ", str(summary_text or "").strip())
@@ -587,6 +635,7 @@ class MyPlugin(Star):
         self,
         event: AstrMessageEvent,
         scope_id: str,
+        summary_keyword: str,
         summary_text: str,
     ) -> None:
         if not scope_id or not summary_text:
@@ -599,7 +648,9 @@ class MyPlugin(Star):
             except Exception as exc:
                 logger.warning("[myenhance] failed to get embedding for memory summary: %s", exc)
 
-        keyword = self._build_memory_keyword(summary_text)
+        keyword = re.sub(r"\s+", " ", str(summary_keyword or "").strip())
+        if not keyword:
+            keyword = self._build_memory_keyword(summary_text)
         try:
             self.memory_store.add_memory(
                 scope_id,
@@ -637,32 +688,16 @@ class MyPlugin(Star):
 
         summary_contexts = context_list[:keep_start_idx]
         kept_contexts = context_list[keep_start_idx:]
-        summary_text = await self._summarize_context_blocks(event, summary_contexts)
-        if summary_text and scope_id:
-            await self._store_system_memory_entry(event, scope_id, summary_text)
+        summary_result = await self._summarize_context_blocks(event, summary_contexts)
+        if summary_result and scope_id:
+            summary_keyword, summary_text = summary_result
+            await self._store_system_memory_entry(event, scope_id, summary_keyword, summary_text)
             logger.info(
                 "[myenhance] summarized %d contexts into system memory for scope %s",
                 len(summary_contexts),
                 scope_id,
             )
         return kept_contexts
-
-    def _append_system_memory_to_prompt(
-        self,
-        scope_id: str,
-        base_prompt: str | None,
-    ) -> str | None:
-        if not scope_id or self.system_memory_inject_count <= 0:
-            return base_prompt
-        records = self.memory_store.list_memories(scope_id)
-        if not records:
-            return base_prompt
-        block_entries = records[-self.system_memory_inject_count :]
-        lines = "\n".join(f"- {entry.content}" for entry in block_entries)
-        memory_block = f"最近记忆回顾：\n{lines}"
-        if base_prompt:
-            return f"{base_prompt}\n\n{memory_block}"
-        return memory_block
 
     def _remove_injected_memory_context_block(self, contexts: list[Any] | None) -> list[Any]:
         if not contexts:
@@ -849,6 +884,8 @@ class MyPlugin(Star):
                 query,
                 records,
                 target_limit,
+                bm25_weight=self.bm25_weight,
+                embedding_weight=self.embedding_weight,
                 embedding_scores=embedding_scores,
                 rrf_k=self.rrf_k,
             )
@@ -876,6 +913,8 @@ class MyPlugin(Star):
                 query,
                 records,
                 self.memory_recall_count,
+                bm25_weight=self.bm25_weight,
+                embedding_weight=self.embedding_weight,
                 embedding_scores=embedding_scores,
                 rrf_k=self.rrf_k,
             )
