@@ -921,8 +921,8 @@ class MyPlugin(Star):
         history_lines, all_history_text = await self._get_recent_history_lines(event)
         
         # 1. 优先检索当前消息相关的记忆
-        logger.debug(f"[myenhance] retrieving related jargon for current message with query: [{event.get_sender_id()}] {event.message_str}")
-        current_jargon = await self._get_related_jargon(event, f"[{event.get_sender_id()}] {event.message_str}")
+        logger.debug(f"[myenhance] retrieving related jargon for current message with query: {event.get_sender_id()} {event.message_str}")
+        current_jargon = await self._get_related_jargon(event, f"{event.get_sender_id()} {event.message_str}")
         
         # 2. 检索历史背景相关的黑话
         context_jargon = []
@@ -939,13 +939,15 @@ class MyPlugin(Star):
         
         # 限制最终注入的数量（取配置值）
         jargons = jargons[:self.jargon_recall_count]
-
+        role_chain = []
         # 清理历史上下文中的 <JARGON> 块，避免模型受到旧黑话干扰
         if req.contexts:
             import re
             mem_pattern = re.compile(r"<JARGON>.*?</JARGON>", re.DOTALL)
             for ctx in req.contexts:
                 if isinstance(ctx, dict):
+                    role = ctx.get("role", "")
+                    role_chain.append(role)
                     content = ctx.get("content")
                     if isinstance(content, str):
                         if "<JARGON>" in content:
@@ -957,6 +959,8 @@ class MyPlugin(Star):
                                 if isinstance(text, str) and "<JARGON>" in text:
                                     item["text"] = mem_pattern.sub("", text).strip()
                 elif hasattr(ctx, "content"):
+                    role = getattr(ctx, "role", "")
+                    role_chain.append(role)
                     content = ctx.content
                     if isinstance(content, str):
                         if "<JARGON>" in content:
@@ -972,8 +976,8 @@ class MyPlugin(Star):
                                         item["text"] = mem_pattern.sub("", text).strip()
                                     else:
                                         setattr(item, "text", mem_pattern.sub("", text).strip())
+        logger.debug(f"[myenhance] message chain: {role_chain}")
 
-        sections: list[str] = []
         histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
         jargon_prompt = "相关黑话：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in jargons)
 
