@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.2")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.3")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -559,7 +559,23 @@ class MyPlugin(Star):
             return None
 
         text = (getattr(response, "completion_text", "") or "").strip()
+        text = self._shorten_memory_summary(text)
         return text or None
+
+    def _shorten_memory_summary(self, summary_text: str, max_chars: int = 120) -> str:
+        normalized = re.sub(r"\s+", " ", str(summary_text or "").strip())
+        if not normalized:
+            return ""
+        if len(normalized) <= max_chars:
+            return normalized
+
+        for sep in ("。", "！", "？", ";", "；", "，", ","):
+            idx = normalized.find(sep)
+            if 0 < idx <= max_chars:
+                return normalized[: idx + 1].strip()
+
+        shortened = normalized[:max_chars].rstrip("，,;；:： ")
+        return f"{shortened}。"
 
     def _build_memory_keyword(self, summary_text: str) -> str:
         normalized = re.sub(r"\s+", " ", str(summary_text or "").strip())
@@ -612,8 +628,10 @@ class MyPlugin(Star):
         if len(user_positions) < self.context_user_limit:
             return context_list
 
-        keep_threshold = min(len(user_positions), max(1, self.context_user_keep_after))
-        keep_start_idx = user_positions[keep_threshold - 1]
+        # 保留最近 N 个 user 块及其后的上下文，而不是从头数第 N 个。
+        keep_user_count = min(len(user_positions), max(1, self.context_user_keep_after))
+        keep_from_user_idx = len(user_positions) - keep_user_count
+        keep_start_idx = user_positions[keep_from_user_idx]
         if keep_start_idx <= 0:
             return context_list
 

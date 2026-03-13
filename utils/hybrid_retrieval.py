@@ -11,6 +11,9 @@ from .jargon_store import JargonRecord
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
+EMOJI_TOKEN_RE = re.compile(
+    r"(?:[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF\u2600-\u27BF](?:\uFE0F|\u200D[\U0001F300-\U0001FAFF\u2600-\u27BF])*)"
+)
 
 
 @dataclass(slots=True)
@@ -87,6 +90,7 @@ def hybrid_search(
 def tokenize(text: str, learned_terms: set[str] | None = None) -> list[str]:
     lowered = str(text or "").lower()
     base_tokens = TOKEN_RE.findall(lowered)
+    emoji_tokens = _extract_emoji_tokens(lowered)
     joined_cjk = "".join(ch for ch in lowered if "\u4e00" <= ch <= "\u9fff")
     bigrams = [joined_cjk[i : i + 2] for i in range(len(joined_cjk) - 1)]
     pinyin_units = _pinyin_units(joined_cjk)
@@ -94,8 +98,12 @@ def tokenize(text: str, learned_terms: set[str] | None = None) -> list[str]:
     if learned_terms:
         for token in base_tokens:
             adaptive_tokens.extend(_adaptive_alnum_subtokens(token, learned_terms))
-    tokens = base_tokens + bigrams + pinyin_units + adaptive_tokens
+    tokens = base_tokens + emoji_tokens + bigrams + pinyin_units + adaptive_tokens
     return [token for token in tokens if token.strip()]
+
+
+def _extract_emoji_tokens(text: str) -> list[str]:
+    return [match.group(0) for match in EMOJI_TOKEN_RE.finditer(text)]
 
 
 def _build_learned_terms(query: str, records: list[JargonRecord]) -> set[str]:
