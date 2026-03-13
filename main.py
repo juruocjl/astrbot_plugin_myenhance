@@ -25,12 +25,12 @@ from astrbot.core.utils.quoted_message_parser import extract_quoted_message_imag
 from .utils.cache_manager import CacheManager
 from .utils.face_map import load_face_desc_map
 from .utils.hybrid_retrieval import hybrid_search
-from .utils.memory_store import MemoryRecord, MemoryStore
+from .utils.jargon_store import JargonRecord, JargonStore
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.11")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.12")
 class MyPlugin(Star):
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -54,7 +54,7 @@ class MyPlugin(Star):
         plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         plugin_data_path.mkdir(parents=True, exist_ok=True)
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
-        self.memory_store_file = plugin_data_path / ".myenhance_memories.json"
+        self.jargon_store_file = plugin_data_path / ".myenhance_jargons.json"
         self.cache_manager = CacheManager(
             self.cache_state_file,
             self.max_history,
@@ -66,7 +66,7 @@ class MyPlugin(Star):
             self.recent_events,
             self.image_url_lru,
         )
-        self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
+        self.jargon_store = JargonStore(self.jargon_store_file, self.jargon_max_records)
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
         self._flask_server = None
         self._flask_thread = None
@@ -88,7 +88,7 @@ class MyPlugin(Star):
     def _build_reply_system_prompt(self) -> str:
         return (
             "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。\n\n"
-            "第一步：请先检查当前对话内容和注入的上下文，判断是否有值得保存的稳定事实、约定，比如用户显式的告诉你缩写或黑称的含义。如果是，请立即调用 add_memory 或 update_memory。注意：记忆工具的调用不影响你对群聊回复的输出。\n\n"
+            "第一步：请先检查当前对话内容和注入的上下文，判断是否有值得保存的稳定事实、约定，比如用户显式地告诉你缩写或黑称的含义。如果是，请立即调用 add_jargon 或 update_jargon。注意：黑话工具的调用不影响你对群聊回复的输出。\n\n"
             "第二步：根据上下文回复消息。请优先引用要回复的消息。若可从上下文中确定目标消息 ID，使用 <quote id=\"msg_id\"/> 并且必须放在输出最开头。\n"
             "每次只能引用一条消息。\n\n"
             "当需要提及用户时，使用 <mention id=\"user_id\"/>，可提及多个用户。\n"
@@ -98,22 +98,26 @@ class MyPlugin(Star):
             "quote 不是容器标签，绝对不要输出 </quote>。\n"
             "若无法或不应回复，完整输出 <refuse/>，且前后不得有任何其他字符。\n\n"
             "系统会注入两类上下文：\n"
-            "1. 与当前消息有关的记忆，格式为 <MEM>[mem-id] 内容；...</MEM>\n"
+            "1. 与当前消息有关的黑话，格式为 <JARGON>[jargon-id] 内容；...</JARGON>\n"
             "2. 最近历史消息，格式中包含 #msg消息ID 和消息内容。\n\n"
-            "当你发现某个稳定事实、用户偏好、约定、长期任务背景值得保存时，并且不在<MEM>块内，调用 add_memory。\n"
-            "add_memory 的参数 content 必须是一句可长期复用的记忆。\n"
-            "当已有记忆不准确、过期或需要修正时，调用 update_memory。\n"
-            "update_memory 需要传入 memory_id 和新的 content。只能修改已给出的记忆 ID。\n\n"
-            "注意记忆中出现人物时，务必标注人物的ID，以便后续消息提及时能正确关联。\n\n"
-            "注意：若存在不在<MEM>块内但值得记忆的稳定事实、约定，请**务必**调用 add_memory 添加记忆。\n"
+
+            "当你发现某个群聊黑话值得保存时，并且不在<JARGON>块内，调用 add_jargon。\n"
+            "add_jargon 的参数 content 必须是一句对黑话的解释。\n"
+            "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息\n"
+            "keyword是用来检索的关键词，因此在编写 keyword 时使用空格分隔，所有关键词应当指代同一对象，也就是这条黑话的主体。\n"
+            "注意：若存在不在<JARGON>块内但值得保存的稳定事实、约定，请**务必**调用 add_jargon 添加黑话。\n"
+
+            "当已有黑话不准确、过期或需要修正时，调用 update_jargon。\n"
+            "update_jargon 需要传入 jargon_id 和新的 content。只能修改已给出的黑话 ID。\n\n"
+            "注意黑话中出现人物时，务必标注人物的ID，以便后续消息提及时能正确关联。\n\n"
             "你**不需要**记录群内发生了什么事，你只需要用户教你事实时调用工具。"
-            "若用户的输入和你的记忆有偏差，请询问 admin 是否真实，你可以无条件相信 admin 给你提供的消息。\n"
-            "当你确信信息有偏差后，请**务必**调用 update_memory 更新记忆。\n"
+            "若用户的输入和你的黑话有偏差，请询问 admin 是否真实，你可以无条件相信 admin 给你提供的消息。\n"
+            "当你确信信息有偏差后，请**务必**调用 update_jargon 更新黑话。\n"
             "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
-            "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息"
-            "当你发现有重复的记忆时，或者有和你当前确认的消息不一致的记忆时，请**务必**调用 delete_memory 删除较简略的重复记忆，保留更详细的记忆。\n" 
-            "你只会将完全确定的信息加入记忆管理库。\n"
-            "keyword是用来检索的关键词，因此在编写 keyword 时使用空格分隔，所有关键词应当指代同一对象，也就是这条记忆的主体。\n"
+
+            "当你发现有重复的黑话，或者有和你当前确认的消息不一致的黑话时，请**务必**调用 delete_jargon 删除较简略的重复黑话，保留更详细的黑话。\n"
+            "你只会将完全确定的信息加入黑话管理库。\n"
+            
             "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
             "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
             "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
@@ -165,11 +169,11 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             self.image_url_cache_size = 120
 
-        raw_memory_recall_count = self.config.get("memory_recall_count", 5)
+        raw_jargon_recall_count = self.config.get("jargon_recall_count", 5)
         try:
-            self.memory_recall_count = max(0, int(raw_memory_recall_count))
+            self.jargon_recall_count = max(0, int(raw_jargon_recall_count))
         except (TypeError, ValueError):
-            self.memory_recall_count = 5
+            self.jargon_recall_count = 5
 
         raw_history_inject_count = self.config.get("history_inject_count", 12)
         try:
@@ -177,11 +181,11 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             self.history_inject_count = 12
 
-        raw_memory_max_records = self.config.get("memory_max_records", 500)
+        raw_jargon_max_records = self.config.get("jargon_max_records", 500)
         try:
-            self.memory_max_records = max(1, int(raw_memory_max_records))
+            self.jargon_max_records = max(1, int(raw_jargon_max_records))
         except (TypeError, ValueError):
-            self.memory_max_records = 500
+            self.jargon_max_records = 500
 
         raw_rrf_k = self.config.get("rrf_k", 60)
         try:
@@ -204,12 +208,12 @@ class MyPlugin(Star):
             self.mod_max_mute_duration = 0
 
         logger.debug(
-            "[myenhance] config: active_reply=%s prob=%.4f history=%s memory_recall=%s memory_max=%s",
+            "[myenhance] config: active_reply=%s prob=%.4f history=%s jargon_recall=%s jargon_max=%s",
             self.active_reply_enable,
             self.active_reply_probability,
             self.history_inject_count,
-            self.memory_recall_count,
-            self.memory_max_records,
+            self.jargon_recall_count,
+            self.jargon_max_records,
         )
 
     def _get_group_lock(self, group_id: str) -> asyncio.Lock:
@@ -444,7 +448,7 @@ class MyPlugin(Star):
             return None
         return provider
 
-    async def _build_embedding_scores(self, query: str, records: list[MemoryRecord]) -> list[float] | None:
+    async def _build_embedding_scores(self, query: str, records: list[JargonRecord]) -> list[float] | None:
         provider = self._get_embedding_provider()
         if not provider or not records:
             return None
@@ -478,7 +482,7 @@ class MyPlugin(Star):
                 for i, vector in zip(doc_indices_to_embed, new_vectors):
                     document_vectors[i] = vector
                     records[i].embedding = vector
-                self.memory_store.save()
+                self.jargon_store.save()
 
             return [self._cosine_similarity(query_vector, vector) for vector in document_vectors]
 
@@ -496,15 +500,15 @@ class MyPlugin(Star):
         dot = sum(left_value * right_value for left_value, right_value in zip(left, right))
         return dot / (left_norm * right_norm)
 
-    async def _get_related_memories(self, event: AstrMessageEvent, query: str):
-        if self.memory_recall_count <= 0:
+    async def _get_related_jargon(self, event: AstrMessageEvent, query: str):
+        if self.jargon_recall_count <= 0:
             return []
 
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
             return []
 
-        records = self.memory_store.list_memories(scope_id)
+        records = self.jargon_store.list_jargons(scope_id)
         if not records:
             return []
 
@@ -517,7 +521,7 @@ class MyPlugin(Star):
             for item in hybrid_search(
                 query,
                 records,
-                self.memory_recall_count,
+                self.jargon_recall_count,
                 embedding_scores=embedding_scores,
                 rrf_k=self.rrf_k,
             )
@@ -688,13 +692,13 @@ class MyPlugin(Star):
         self._set_cached_image_desc(target_image, text)
         return text
 
-    @filter.llm_tool(name="add_memory")
-    async def add_memory(self, event: AstrMessageEvent, content: str = "", keyword: str = "") -> str:
-        """添加一条可长期复用的记忆。
+    @filter.llm_tool(name="add_jargon")
+    async def add_jargon(self, event: AstrMessageEvent, content: str = "", keyword: str = "") -> str:
+        """添加一条可长期复用的黑话。
 
         Args:
-            content(string): 需要保存的一句话记忆内容。
-            keyword(string): 关联的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象，所有关键词应当指代同一对象。
+            content(string): 需要保存的一句话黑话内容。
+            keyword(string): 关联的关键词，用于黑话检索，使用空格分隔，是这条黑话的主语或要解释的对象，所有关键词应当指代同一对象。
         """
         normalized_content = str(content or "").strip()
         normalized_keyword = str(keyword or "").strip()
@@ -705,7 +709,7 @@ class MyPlugin(Star):
 
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
-            return "Error: no valid scope for memory."
+            return "Error: no valid scope for jargon."
 
         embedding = None
         provider = self._get_embedding_provider()
@@ -713,10 +717,10 @@ class MyPlugin(Star):
             try:
                 embedding = await provider.get_embedding(normalized_content)
             except Exception as exc:
-                logger.warning("[myenhance] failed to get embedding for new memory: %s", exc)
+                logger.warning("[myenhance] failed to get embedding for new jargon: %s", exc)
 
         try:
-            record = self.memory_store.add_memory(
+            record = self.jargon_store.add_jargon(
                 scope_id,
                 normalized_content,
                 keyword=normalized_keyword,
@@ -725,26 +729,26 @@ class MyPlugin(Star):
         except ValueError as exc:
             return f"Error: {exc}"
 
-        logger.info("[myenhance] added memory %s in scope %s (with embedding: %s)", 
+        logger.info("[myenhance] added jargon %s in scope %s (with embedding: %s)",
                     record.id, scope_id, bool(embedding))
-        return f"Added memory: id={record.id} content={record.content}"
+        return f"Added jargon: id={record.id} content={record.content}"
 
-    @filter.llm_tool(name="update_memory")
-    async def update_memory(
+    @filter.llm_tool(name="update_jargon")
+    async def update_jargon(
         self,
         event: AstrMessageEvent,
-        memory_id: str = "",
+        jargon_id: str = "",
         content: str = "",
         keyword: str = "",
     ) -> str:
-        """根据记忆 ID 修改已有记忆。
+        """根据黑话 ID 修改已有黑话。
 
         Args:
-            memory_id(string): 需要修改的记忆 ID。
-            content(string): 修改后的记忆内容，可留空表示不修改。
-            keyword(string): 修改后的关键词，用于记忆检索，使用空格分格，是这条记忆的主语或要解释的对象，所有关键词应当指代同一对象。
+            jargon_id(string): 需要修改的黑话 ID。
+            content(string): 修改后的黑话内容，可留空表示不修改。
+            keyword(string): 修改后的关键词，用于黑话检索，使用空格分隔，是这条黑话的主语或要解释的对象，所有关键词应当指代同一对象。
         """
-        normalized_id = str(memory_id or "").strip()
+        normalized_id = str(jargon_id or "").strip()
         normalized_content = str(content or "").strip()
         if normalized_content == "":
             normalized_content = None
@@ -752,13 +756,13 @@ class MyPlugin(Star):
         if normalized_keyword == "":
             normalized_keyword = None
         if not normalized_id:
-            return "Error: memory_id is empty."
+            return "Error: jargon_id is empty."
         if normalized_content is None and normalized_keyword is None:
             return "Error: nothing to update."
 
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
-            return "Error: no valid scope for memory."
+            return "Error: no valid scope for jargon."
 
         embedding = None
         provider = self._get_embedding_provider() if normalized_content is not None else None
@@ -766,9 +770,9 @@ class MyPlugin(Star):
             try:
                 embedding = await provider.get_embedding(normalized_content)
             except Exception as exc:
-                logger.warning("[myenhance] failed to get embedding for updated memory: %s", exc)
+                logger.warning("[myenhance] failed to get embedding for updated jargon: %s", exc)
 
-        record = self.memory_store.update_memory(
+        record = self.jargon_store.update_jargon(
             scope_id,
             normalized_id,
             normalized_content,
@@ -776,52 +780,48 @@ class MyPlugin(Star):
             embedding=embedding,
         )
         if not record:
-            return f"Error: memory not found: {normalized_id}"
+            return f"Error: jargon not found: {normalized_id}"
 
-        logger.info("[myenhance] updated memory %s in scope %s (with embedding: %s)", 
+        logger.info("[myenhance] updated jargon %s in scope %s (with embedding: %s)",
                     record.id, scope_id, bool(embedding))
-        return f"Updated memory: id={record.id} content={record.content}"
+        return f"Updated jargon: id={record.id} content={record.content}"
 
-    @filter.llm_tool(name="delete_memory")
-    async def delete_memory(self, event: AstrMessageEvent, memory_id: str = "") -> str:
-        """删除某条记忆，若检测到重复则优先清理较简略的内容。
-
-        Args:
-            memory_id(string): 直接删除指定 ID。
-        """
+    @filter.llm_tool(name="delete_jargon")
+    async def delete_jargon(self, event: AstrMessageEvent, jargon_id: str = "") -> str:
+        """删除某条黑话，若检测到重复则优先清理较简略的内容。"""
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
-            return "Error: no valid scope for memory."
+            return "Error: no valid scope for jargon."
 
-        if memory_id:
-            records = self.memory_store.list_memories(scope_id)
-            record = next((r for r in records if r.id == memory_id), None)
+        if jargon_id:
+            records = self.jargon_store.list_jargons(scope_id)
+            record = next((r for r in records if r.id == jargon_id), None)
             if not record:
-                return f"Error: memory not found: {memory_id}."
+                return f"Error: jargon not found: {jargon_id}."
             normalized_content = (record.content or "").strip().lower()
 
-            success = self.memory_store.delete_memory(scope_id, memory_id)
+            success = self.jargon_store.delete_jargon(scope_id, jargon_id)
             if not success:
-                return f"Error: memory not found: {memory_id}."
+                return f"Error: jargon not found: {jargon_id}."
 
-            message = [f"Deleted memory: id={memory_id}."]
+            message = [f"Deleted jargon: id={jargon_id}."]
             if normalized_content:
-                records_after = self.memory_store.list_memories(scope_id)
+                records_after = self.jargon_store.list_jargons(scope_id)
                 duplicates = [
                     r for r in records_after
-                    if r.content.strip().lower() == normalized_content and r.id != memory_id
+                    if r.content.strip().lower() == normalized_content and r.id != jargon_id
                 ]
                 if duplicates:
                     duplicates.sort(key=lambda r: len(r.content or ""))
                     shortest = duplicates[0]
                     longest = duplicates[-1]
-                    if shortest.id != longest.id and self.memory_store.delete_memory(scope_id, shortest.id):
+                    if shortest.id != longest.id and self.jargon_store.delete_jargon(scope_id, shortest.id):
                         message.append(
-                            f"发现重复记忆，删除内容较简略的 {shortest.id}，保留更详细的 {longest.id}."
+                            f"发现重复黑话，删除内容较简略的 {shortest.id}，保留更详细的 {longest.id}."
                         )
             return " ".join(message)
 
-        return "Error: memory_id is empty."
+        return "Error: jargon_id is empty."
 
     @filter.llm_tool(name="mute_member")
     async def mute_member(
@@ -921,45 +921,45 @@ class MyPlugin(Star):
         history_lines, all_history_text = await self._get_recent_history_lines(event)
         
         # 1. 优先检索当前消息相关的记忆
-        logger.debug(f"[myenhance] retrieving related memories for current message with query: [{event.get_sender_id()}] {event.message_str}")
-        current_memories = await self._get_related_memories(event, f"[{event.get_sender_id()}] {event.message_str}")
+        logger.debug(f"[myenhance] retrieving related jargon for current message with query: [{event.get_sender_id()}] {event.message_str}")
+        current_jargon = await self._get_related_jargon(event, f"[{event.get_sender_id()}] {event.message_str}")
         
-        # 2. 检索历史背景相关的记忆
-        context_memories = []
+        # 2. 检索历史背景相关的黑话
+        context_jargon = []
         if all_history_text:
-            context_memories = await self._get_related_memories(event, all_history_text)
+            context_jargon = await self._get_related_jargon(event, all_history_text)
             
-        # 3. 合并记忆并去重，保持当前消息的相关记忆在前
+        # 3. 合并黑话并去重，保持当前消息的相关黑话在前
         seen_ids = set()
-        memories = []
-        for m in current_memories + context_memories:
+        jargons = []
+        for m in current_jargon + context_jargon:
             if m.id not in seen_ids:
-                memories.append(m)
+                jargons.append(m)
                 seen_ids.add(m.id)
         
         # 限制最终注入的数量（取配置值）
-        memories = memories[:self.memory_recall_count]
+        jargons = jargons[:self.jargon_recall_count]
 
-        # 清理历史上下文中的 <MEM> 块，避免模型受到旧记忆干扰
+        # 清理历史上下文中的 <JARGON> 块，避免模型受到旧黑话干扰
         if req.contexts:
             import re
-            mem_pattern = re.compile(r"<MEM>.*?</MEM>", re.DOTALL)
+            mem_pattern = re.compile(r"<JARGON>.*?</JARGON>", re.DOTALL)
             for ctx in req.contexts:
                 if isinstance(ctx, dict):
                     content = ctx.get("content")
                     if isinstance(content, str):
-                        if "<MEM>" in content:
+                        if "<JARGON>" in content:
                             ctx["content"] = mem_pattern.sub("", content).strip()
                     elif isinstance(content, list):
                         for item in content:
                             if isinstance(item, dict) and item.get("type") == "text":
                                 text = item.get("text", "")
-                                if isinstance(text, str) and "<MEM>" in text:
+                                if isinstance(text, str) and "<JARGON>" in text:
                                     item["text"] = mem_pattern.sub("", text).strip()
                 elif hasattr(ctx, "content"):
                     content = ctx.content
                     if isinstance(content, str):
-                        if "<MEM>" in content:
+                        if "<JARGON>" in content:
                             ctx.content = mem_pattern.sub("", content).strip()
                     elif isinstance(content, list):
                         for item in content:
@@ -967,7 +967,7 @@ class MyPlugin(Star):
                                (hasattr(item, "type") and getattr(item, "type") == "text"):
                                 
                                 text = item.get("text") if isinstance(item, dict) else getattr(item, "text", "")
-                                if isinstance(text, str) and "<MEM>" in text:
+                                if isinstance(text, str) and "<JARGON>" in text:
                                     if isinstance(item, dict):
                                         item["text"] = mem_pattern.sub("", text).strip()
                                     else:
@@ -975,7 +975,7 @@ class MyPlugin(Star):
 
         sections: list[str] = []
         histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
-        memories_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in memories)
+        jargon_prompt = "相关黑话：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in jargons)
 
         bot_id = self._get_bot_id(event)
         current_msg_id = getattr(event.message_obj, "message_id", "unknown")
@@ -985,22 +985,22 @@ class MyPlugin(Star):
             f"你的id是{bot_id}。\n"
             f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
             f"{original_prompt}\n\n"
-            "<MEM>\n"
-            "以下是相关记忆："
-            f"{memories_prompt}"
+            "<JARGON>\n"
+            "以下是相关黑话："
+            f"{jargon_prompt}"
             "\n=====\n"
-            "请回忆记忆管理完整流程：1. 检查是否删除重复记忆或错误记忆 2. 检查是否要更改记忆，没有改动请不要调用 3. 检查是否要新增记忆\n"
-            "如果是待确认的内容，你**不应该调用任何工具**更改记忆。\n"
-            "注意如果你选择先更改记忆，那么**不应该输出任何内容**来回复消息，当工具调用完成再进行回复。\n"
+            "请回忆黑话管理完整流程：1. 检查是否删除重复黑话或错误黑话 2. 检查是否要更改黑话，没有改动请不要调用 3. 检查是否要新增黑话\n"
+            "如果是待确认的内容，你**不应该调用任何工具**更改黑话。\n"
+            "注意如果你选择先更改黑话，那么**不应该输出任何内容**来回复消息，当工具调用完成再进行回复。\n"
             "如果你已经回复过，那么你**禁止**再回复相同内容。\n"
             "所有关键词都应当是指代同一对象的不同说法。\n"
             "=====\n"
-            "</MEM>"
+            "</JARGON>"
         )
 
         logger.info(
-            "[myenhance] injected %s related memories and %s history messages",
-            len(memories),
+            "[myenhance] injected %s related jargon entries and %s history messages",
+            len(jargons),
             len(history_lines),
         )
 

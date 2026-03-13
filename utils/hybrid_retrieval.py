@@ -7,15 +7,15 @@ import re
 from rank_bm25 import BM25Okapi
 from pypinyin import lazy_pinyin, Style
 
-from .memory_store import MemoryRecord
+from .jargon_store import JargonRecord
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 
 
 @dataclass(slots=True)
-class ScoredMemory:
-    record: MemoryRecord
+class ScoredJargon:
+    record: JargonRecord
     score: float
     bm25_score: float
     embedding_score: float
@@ -23,13 +23,13 @@ class ScoredMemory:
 
 def hybrid_search(
     query: str,
-    records: list[MemoryRecord],
+    records: list[JargonRecord],
     top_k: int,
     bm25_weight: float = 0.55,
     embedding_weight: float = 0.45,
     rrf_k: int = 60,
     embedding_scores: list[float] | None = None,
-) -> list[ScoredMemory]:
+) -> list[ScoredJargon]:
     normalized_query = str(query or "").strip()
     if not normalized_query or not records or top_k <= 0:
         return []
@@ -61,7 +61,7 @@ def hybrid_search(
     bm25_ranks = _build_ranks(bm25_scores)
     embedding_ranks = _build_ranks(final_embedding_scores)
 
-    merged: list[ScoredMemory] = []
+    merged: list[ScoredJargon] = []
     for index, record in enumerate(records):
         bm25_rank = bm25_ranks[index]
         embedding_rank = embedding_ranks[index]
@@ -72,7 +72,7 @@ def hybrid_search(
         if bm25_scores[index] <= 0 and final_embedding_scores[index] <= 0:
             continue
         merged.append(
-            ScoredMemory(
+            ScoredJargon(
                 record=record,
                 score=score,
                 bm25_score=bm25_scores[index],
@@ -98,7 +98,7 @@ def tokenize(text: str, learned_terms: set[str] | None = None) -> list[str]:
     return [token for token in tokens if token.strip()]
 
 
-def _build_learned_terms(query: str, records: list[MemoryRecord]) -> set[str]:
+def _build_learned_terms(query: str, records: list[JargonRecord]) -> set[str]:
     learned_terms: set[str] = set()
     texts = [query]
     texts.extend((record.keyword or record.content or "") for record in records)

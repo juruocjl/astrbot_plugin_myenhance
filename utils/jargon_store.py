@@ -9,7 +9,7 @@ from astrbot.api import logger
 
 
 @dataclass(slots=True)
-class MemoryRecord:
+class JargonRecord:
     id: str
     content: str
     keyword: str
@@ -18,13 +18,13 @@ class MemoryRecord:
     embedding: list[float] | None = None
 
 
-class MemoryStore:
-    """按会话范围管理持久化记忆。"""
+class JargonStore:
+    """按会话范围管理持久化黑话。"""
 
     def __init__(self, store_file: Path, max_records_per_scope: int = 500):
         self.store_file = store_file
         self.max_records_per_scope = max(1, int(max_records_per_scope))
-        self.memories_by_scope: dict[str, list[MemoryRecord]] = {}
+        self.jargons_by_scope: dict[str, list[JargonRecord]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -34,23 +34,23 @@ class MemoryStore:
         try:
             data = json.loads(self.store_file.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("[myenhance] failed to load memory store: %s", exc)
+            logger.warning("[myenhance] failed to load jargon store: %s", exc)
             return
 
         scopes = data.get("scopes", {})
         if not isinstance(scopes, dict):
             return
 
-        loaded: dict[str, list[MemoryRecord]] = {}
+        loaded: dict[str, list[JargonRecord]] = {}
         for scope_id, items in scopes.items():
             if not isinstance(scope_id, str) or not isinstance(items, list):
                 continue
 
-            records: list[MemoryRecord] = []
+            records: list[JargonRecord] = []
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                memory_id = str(item.get("id") or "").strip()
+                jargon_id = str(item.get("id") or "").strip()
                 content = str(item.get("content") or "").strip()
                 created_at = str(item.get("created_at") or "").strip()
                 updated_at = str(item.get("updated_at") or created_at or "").strip()
@@ -59,13 +59,13 @@ class MemoryStore:
                     embedding = None
 
                 keyword = str(item.get("keyword") or "").strip()
-                if not memory_id or not content:
+                if not jargon_id or not content:
                     continue
                 if not keyword:
                     keyword = content
                 records.append(
-                    MemoryRecord(
-                        id=memory_id,
+                    JargonRecord(
+                        id=jargon_id,
                         content=content,
                         keyword=keyword,
                         created_at=created_at or self._now_iso(),
@@ -77,14 +77,14 @@ class MemoryStore:
             if records:
                 loaded[scope_id] = records[-self.max_records_per_scope :]
 
-        self.memories_by_scope = loaded
+        self.jargons_by_scope = loaded
 
     def save(self) -> None:
         try:
             payload = {
                 "scopes": {
                     scope_id: [asdict(record) for record in records]
-                    for scope_id, records in self.memories_by_scope.items()
+                    for scope_id, records in self.jargons_by_scope.items()
                 }
             }
             self.store_file.write_text(
@@ -92,18 +92,18 @@ class MemoryStore:
                 encoding="utf-8",
             )
         except Exception as exc:
-            logger.warning("[myenhance] failed to save memory store: %s", exc)
+            logger.warning("[myenhance] failed to save jargon store: %s", exc)
 
-    def list_memories(self, scope_id: str) -> list[MemoryRecord]:
-        return list(self.memories_by_scope.get(scope_id, []))
+    def list_jargons(self, scope_id: str) -> list[JargonRecord]:
+        return list(self.jargons_by_scope.get(scope_id, []))
 
-    def add_memory(
+    def add_jargon(
         self,
         scope_id: str,
         content: str,
         keyword: str | None = None,
         embedding: list[float] | None = None,
-    ) -> MemoryRecord:
+    ) -> JargonRecord:
         normalized_scope = str(scope_id or "").strip()
         normalized_content = str(content or "").strip()
         normalized_keyword = str(keyword or "").strip()
@@ -114,10 +114,10 @@ class MemoryStore:
         if not normalized_keyword:
             raise ValueError("keyword is empty")
 
-        records = self.memories_by_scope.setdefault(normalized_scope, [])
+        records = self.jargons_by_scope.setdefault(normalized_scope, [])
         now = self._now_iso()
-        record = MemoryRecord(
-            id=self._next_id(records),
+        record = JargonRecord(
+            id=self._next_jargon_id(records),
             content=normalized_content,
             keyword=normalized_keyword,
             created_at=now,
@@ -130,16 +130,16 @@ class MemoryStore:
         self.save()
         return record
 
-    def update_memory(
+    def update_jargon(
         self,
         scope_id: str,
-        memory_id: str,
+        jargon_id: str,
         content: str | None = None,
         keyword: str | None = None,
         embedding: list[float] | None = None,
-    ) -> MemoryRecord | None:
+    ) -> JargonRecord | None:
         normalized_scope = str(scope_id or "").strip()
-        normalized_id = str(memory_id or "").strip()
+        normalized_id = str(jargon_id or "").strip()
         normalized_content = None
         if content is not None:
             normalized_content = str(content or "").strip() or None
@@ -153,7 +153,7 @@ class MemoryStore:
         if normalized_content is None and normalized_keyword is None and embedding is None:
             return None
 
-        for record in self.memories_by_scope.get(normalized_scope, []):
+        for record in self.jargons_by_scope.get(normalized_scope, []):
             if record.id != normalized_id:
                 continue
             if normalized_content is not None:
@@ -167,25 +167,25 @@ class MemoryStore:
             return record
         return None
 
-    def delete_memory(self, scope_id: str, memory_id: str) -> bool:
+    def delete_jargon(self, scope_id: str, jargon_id: str) -> bool:
         normalized_scope = str(scope_id or "").strip()
-        normalized_id = str(memory_id or "").strip()
+        normalized_id = str(jargon_id or "").strip()
         if not normalized_scope or not normalized_id:
             return False
 
-        if normalized_scope not in self.memories_by_scope:
+        if normalized_scope not in self.jargons_by_scope:
             return False
 
-        records = self.memories_by_scope[normalized_scope]
+        records = self.jargons_by_scope[normalized_scope]
         original_len = len(records)
         new_records = [r for r in records if r.id != normalized_id]
         if len(new_records) < original_len:
-            self.memories_by_scope[normalized_scope] = new_records
+            self.jargons_by_scope[normalized_scope] = new_records
             self.save()
             return True
         return False
 
-    def _next_id(self, records: list[MemoryRecord]) -> str:
+    def _next_jargon_id(self, records: list[JargonRecord]) -> str:
         max_index = 0
         for record in records:
             if not record.id.startswith("mem-"):

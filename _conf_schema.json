@@ -31,7 +31,7 @@
     "default": ""
   },
   "embedding_provider_id": {
-    "description": "记忆检索使用的 embedding provider_id，留空则回退为本地哈希向量",
+    "description": "黑话检索使用的 embedding provider_id，留空则回退为本地哈希向量",
     "type": "string",
     "default": ""
   },
@@ -45,8 +45,8 @@
     "type": "int",
     "default": 120
   },
-  "memory_recall_count": {
-    "description": "每次向 prompt 注入多少条与当前消息相关的记忆",
+  "jargon_recall_count": {
+    "description": "每次向 prompt 注入多少条与当前消息相关的黑话",
     "type": "int",
     "default": 5
   },
@@ -55,8 +55,8 @@
     "type": "int",
     "default": 12
   },
-  "memory_max_records": {
-    "description": "每个会话范围最多保存多少条记忆",
+  "jargon_max_records": {
+    "description": "每个会话范围最多保存多少条黑话",
     "type": "int",
     "default": 500
   },

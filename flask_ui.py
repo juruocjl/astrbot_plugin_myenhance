@@ -16,13 +16,13 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>MyEnhance 记忆管理</title>
+        <title>MyEnhance 黑话管理</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <link href="https://cdn.bootcdn.net/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
         <style>
             body { padding: 20px; background-color: #f8f9fa; }
-            .memory-card { margin-bottom: 15px; }
+            .jargon-card { margin-bottom: 15px; }
             .scope-header { background: #e9ecef; padding: 10px; border-radius: 5px; margin-top: 20px; }
             .search-panel { border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04); }
             .search-results .card { border-radius: 6px; }
@@ -31,11 +31,11 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     </head>
     <body>
         <div class="container">
-            <h2 class="mb-4">MyEnhance 记忆管理</h2>
+            <h2 class="mb-4">MyEnhance 黑话管理</h2>
             
             <div class="card mb-3 search-panel">
                 <div class="card-body">
-                    <h5 class="card-title mb-3">检索记忆</h5>
+                    <h5 class="card-title mb-3">检索黑话</h5>
                     <div class="row g-2 align-items-end">
                         <div class="col-md-3">
                             <label class="form-label">会话</label>
@@ -52,7 +52,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                             <input type="number" class="form-control" id="searchLimit" value="5" min="1" max="50">
                         </div>
                         <div class="col-md-2">
-                            <button class="btn btn-primary w-100" id="search-button" onclick="searchMemories()">检索</button>
+                            <button class="btn btn-primary w-100" id="search-button" onclick="searchJargon()">检索</button>
                         </div>
                     </div>
                 </div>
@@ -145,7 +145,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                     .join('');
             }
 
-            async function searchMemories() {
+            async function searchJargon() {
                 const scopeSelect = document.getElementById('scopeSelect');
                 const queryInput = document.getElementById('searchQuery');
                 const limitInput = document.getElementById('searchLimit');
@@ -188,7 +188,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                     renderSearchResults(res.results || [], {
                         message: res.results && res.results.length
                             ? `查询「${query}」共 ${res.results.length} 条`
-                            : `查询「${query}」未命中记忆`,
+                            : `查询「${query}」未命中黑话`,
                     });
                 } catch (err) {
                     if (resultsContainer) {
@@ -200,14 +200,14 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 }
             }
 
-            async function loadMemories() {
+            async function loadJargon() {
                 const resp = await fetch('/api/list');
                 const data = await resp.json();
                 const content = document.getElementById('content');
                 const scopeEntries = Object.keys(data.scopes);
 
                 if (scopeEntries.length === 0) {
-                    content.innerHTML = '<div class="alert alert-info">暂无记忆数据</div>';
+                    content.innerHTML = '<div class="alert alert-info">暂无黑话数据</div>';
                     populateScopeSelect({});
                     renderSearchResults([], { message: '暂无可检索的会话' });
                     return;
@@ -228,13 +228,13 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                         const contentData = encodeURIComponent(rawContent);
                         const keywordData = encodeURIComponent(rawKeyword);
                         html += `
-                            <div class="card memory-card">
+                            <div class="card jargon-card">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between">
                                         <h6 class="card-subtitle mb-2 text-muted">ID: ${escapeHtml(r.id)} | 更新: ${escapeHtml(r.updated_at)}</h6>
                                         <div>
-                                            <button class="btn btn-sm btn-outline-primary" data-scope="${scopeAttr}" data-id="${idAttr}" data-content="${contentData}" data-keyword="${keywordData}" onclick="editMemory(this)">编辑</button>
-                                            <button class="btn btn-sm btn-outline-danger" data-scope="${scopeAttr}" data-id="${idAttr}" onclick="deleteMemory(this)">删除</button>
+                                            <button class="btn btn-sm btn-outline-primary" data-scope="${scopeAttr}" data-id="${idAttr}" data-content="${contentData}" data-keyword="${keywordData}" onclick="editJargon(this)">编辑</button>
+                                            <button class="btn btn-sm btn-outline-danger" data-scope="${scopeAttr}" data-id="${idAttr}" onclick="deleteJargon(this)">删除</button>
                                         </div>
                                     </div>
                                     <p class="card-text mb-1"><strong>关键词：</strong>${keywordDisplay}</p>
@@ -248,7 +248,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 renderSearchResults([], { message: '请选择会话并输入关键词' });
             }
 
-            async function editMemory(button) {
+            async function editJargon(button) {
                 const scope = button?.dataset?.scope;
                 const id = button?.dataset?.id;
                 if (!scope || !id) {
@@ -264,7 +264,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                     alert('关键词不能为空');
                     return;
                 }
-                const newContent = prompt('修改记忆内容:', oldContent);
+                const newContent = prompt('修改黑话内容:', oldContent);
                 if (newContent === null) return;
                 const hasKeywordChange = trimmedKeyword !== (oldKeyword || '').trim();
                 const hasContentChange = newContent !== oldContent;
@@ -289,17 +289,17 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 });
                 const res = await resp.json();
                 alert(res.msg);
-                loadMemories();
+                loadJargon();
             }
 
-            async function deleteMemory(button) {
+            async function deleteJargon(button) {
                 const scope = button?.dataset?.scope;
                 const id = button?.dataset?.id;
                 if (!scope || !id) {
                     alert('删除目标信息缺失');
                     return;
                 }
-                if (!confirm('确定要删除这条记忆吗？')) return;
+                if (!confirm('确定要删除这条黑话吗？')) return;
                 
                 const resp = await fetch('/api/delete', {
                     method: 'POST',
@@ -308,10 +308,10 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 });
                 const res = await resp.json();
                 alert(res.msg);
-                loadMemories();
+                loadJargon();
             }
 
-            loadMemories();
+            loadJargon();
         </script>
     </body>
     </html>
@@ -324,7 +324,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     @app.route('/api/list')
     def api_list():
         data = {"scopes": {}}
-        scopes_items = list(plugin_instance.memory_store.memories_by_scope.items())
+        scopes_items = list(plugin_instance.jargon_store.jargons_by_scope.items())
         
         for s_id, records in scopes_items:
             data["scopes"][s_id] = [
@@ -341,7 +341,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     @app.route('/api/update', methods=['POST'])
     def api_update():
         data = request.json
-        success = plugin_instance.memory_store.update_memory(
+        success = plugin_instance.jargon_store.update_jargon(
             data.get("scope"), data.get("id"), data.get("content"), data.get("keyword")
         )
         return jsonify({"success": bool(success), "msg": "修改成功" if success else "修改失败"})
@@ -358,15 +358,15 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
                 "results": [],
             })
         try:
-            limit = int(data.get("limit", plugin_instance.memory_recall_count or 5))
+            limit = int(data.get("limit", plugin_instance.jargon_recall_count or 5))
         except (TypeError, ValueError):
-            limit = plugin_instance.memory_recall_count or 5
+            limit = plugin_instance.jargon_recall_count or 5
         limit = max(1, min(limit, 50))
-        records = plugin_instance.memory_store.list_memories(scope)
+        records = plugin_instance.jargon_store.list_jargons(scope)
         if not records:
             return jsonify({
                 "success": True,
-                "msg": "当前会话暂无记忆",
+                "msg": "当前会话暂无黑话",
                 "results": [],
             })
         try:
@@ -385,7 +385,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
             })
         return jsonify({
             "success": True,
-            "msg": f"检索到 {len(scored)} 条记忆",
+            "msg": f"检索到 {len(scored)} 条黑话",
             "results": [
                 {
                     "id": item.record.id,
@@ -403,7 +403,7 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     @app.route('/api/delete', methods=['POST'])
     def api_delete():
         data = request.json
-        success = plugin_instance.memory_store.delete_memory(
+        success = plugin_instance.jargon_store.delete_jargon(
             data.get("scope"), data.get("id")
         )
         return jsonify({"success": success, "msg": "删除成功" if success else "删除失败"})
