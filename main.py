@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.11")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.12")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -872,23 +872,6 @@ class MyPlugin(Star):
             )
         return kept_contexts
 
-    def _remove_injected_memory_context_block(self, contexts: list[Any] | None) -> list[Any]:
-        if not contexts:
-            return []
-
-        kept: list[Any] = []
-        marker = self.MEMORY_CONTEXT_MARKER
-        memory_tag = "<MEMORY>"
-        jargon_tag = "<JARGON>"
-        for ctx in contexts:
-            role = self._get_context_role(ctx)
-            content = ctx.get("content") if isinstance(ctx, dict) else getattr(ctx, "content", None)
-            text = self._extract_context_text(content)
-            if role == "user" and (marker in text or memory_tag in text or jargon_tag in text):
-                continue
-            kept.append(ctx)
-        return kept
-
     def _build_recent_memory_context_block(self, scope_id: str, limit: int = 5) -> str | None:
         records = self.memory_store.list_memories(scope_id)
         if not records:
@@ -1446,7 +1429,6 @@ class MyPlugin(Star):
                     await self._append_managed_context(scope_id, item["role"], item["content"])
 
                 managed_contexts = await self._get_managed_contexts(scope_id)
-                managed_contexts = self._remove_injected_memory_context_block(managed_contexts)
                 managed_contexts = await self._apply_context_memory_management(
                     event,
                     scope_id,
@@ -1517,7 +1499,7 @@ class MyPlugin(Star):
                 )
 
                 await self._append_managed_context(scope_id, "user", history_current_block)
-                req.contexts = []
+                req.contexts = self._inject_recent_memory_context_block([], scope_id)
                 req.prompt = (
                     f"{history_current_block}"
                     "\n\n<MEMORY>\n"
