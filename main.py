@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.1")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.2")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -649,7 +649,7 @@ class MyPlugin(Star):
         if not block:
             return context_list
 
-        context_list.append({"role": "user", "content": block})
+        context_list.insert(0, {"role": "user", "content": block})
         return context_list
 
     def _clean_injected_context_blocks(self, contexts: list[Any] | None, tags: list[str]) -> list[str]:
