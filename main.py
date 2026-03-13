@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.12")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.13")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -1498,8 +1498,12 @@ class MyPlugin(Star):
                     f"{original_prompt}\n"
                 )
 
+                await self._append_managed_context(scope_id, "user", history_current_block)
                 managed_contexts = await self._get_managed_contexts(scope_id)
-                req.contexts = self._inject_recent_memory_context_block(managed_contexts, scope_id)
+                base_contexts = list(req.contexts or [])
+                if not base_contexts:
+                    base_contexts = list(managed_contexts)
+                req.contexts = self._inject_recent_memory_context_block(base_contexts, scope_id)
                 req.prompt = (
                     f"{history_current_block}"
                     "\n\n<MEMORY>\n"
@@ -1513,7 +1517,6 @@ class MyPlugin(Star):
                     "=====\n"
                     "</JARGON>"
                 )
-                await self._append_managed_context(scope_id, "user", history_current_block)
 
                 logger.info(
                     "[myenhance] injected %s related memories, %s related jargon entries and %s history messages",
