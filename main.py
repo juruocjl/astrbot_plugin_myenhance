@@ -566,8 +566,8 @@ class MyPlugin(Star):
                         parts = line.split("\n", 1)
                         text = parts[1] if len(parts) > 1 else line
                         search_lines.append(text)
-                history_lines.append(line)
-                if item_ts > current_event_ts:
+                    history_lines.append(line)
+                else:
                     remaining_items.append((item_ts, item_msg_id, line))
             history.clear()
             history.extend(remaining_items)
