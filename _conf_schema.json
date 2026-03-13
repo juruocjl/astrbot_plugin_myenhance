@@ -45,8 +45,13 @@
     "type": "int",
     "default": 120
   },
-  "jargon_recall_count": {
-    "description": "每次向 prompt 注入多少条与当前消息相关的黑话",
+  "jargon_current_recall_count": {
+    "description": "当前语句检索黑话时，优先召回多少条",
+    "type": "int",
+    "default": 3
+  },
+  "jargon_total_recall_count": {
+    "description": "每次向 prompt 最多注入多少条黑话（当前语句+历史背景合并后）",
     "type": "int",
     "default": 5
   },

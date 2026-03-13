@@ -68,9 +68,9 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
             return jsonify({"success": False, "msg": "scope and query are required", "results": []})
 
         try:
-            limit = int(data.get("limit", plugin_instance.jargon_recall_count or 5))
+            limit = int(data.get("limit", plugin_instance.jargon_total_recall_count or 5))
         except (TypeError, ValueError):
-            limit = plugin_instance.jargon_recall_count or 5
+            limit = plugin_instance.jargon_total_recall_count or 5
         limit = max(1, min(limit, 50))
 
         records = plugin_instance.jargon_store.list_jargons(scope)

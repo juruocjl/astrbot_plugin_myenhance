@@ -138,11 +138,22 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             self.image_url_cache_size = 120
 
-        raw_jargon_recall_count = self.config.get("jargon_recall_count", 5)
+        raw_jargon_current_recall_count = self.config.get("jargon_current_recall_count", 3)
         try:
-            self.jargon_recall_count = max(0, int(raw_jargon_recall_count))
+            self.jargon_current_recall_count = max(0, int(raw_jargon_current_recall_count))
         except (TypeError, ValueError):
-            self.jargon_recall_count = 5
+            self.jargon_current_recall_count = 3
+
+        raw_jargon_total_recall_count = self.config.get(
+            "jargon_total_recall_count",
+            self.config.get("jargon_recall_count", 5),
+        )
+        try:
+            self.jargon_total_recall_count = max(0, int(raw_jargon_total_recall_count))
+        except (TypeError, ValueError):
+            self.jargon_total_recall_count = 5
+        # Backward compatibility for old code paths.
+        self.jargon_recall_count = self.jargon_total_recall_count
 
         raw_history_inject_count = self.config.get("history_inject_count", 12)
         try:
@@ -225,7 +236,8 @@ class MyPlugin(Star):
             "describe_image_ask": self.describe_image_ask,
             "embedding_provider_id": self.embedding_provider_id,
             "image_url_cache_size": self.image_url_cache_size,
-            "jargon_recall_count": self.jargon_recall_count,
+            "jargon_current_recall_count": self.jargon_current_recall_count,
+            "jargon_total_recall_count": self.jargon_total_recall_count,
             "history_inject_count": self.history_inject_count,
             "context_user_limit": self.context_user_limit,
             "context_user_keep_after": self.context_user_keep_after,
@@ -791,8 +803,14 @@ class MyPlugin(Star):
         dot = sum(left_value * right_value for left_value, right_value in zip(left, right))
         return dot / (left_norm * right_norm)
 
-    async def _get_related_jargon(self, event: AstrMessageEvent, query: str) -> list[JargonRecord]:
-        if self.jargon_recall_count <= 0:
+    async def _get_related_jargon(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        limit: int | None = None,
+    ) -> list[JargonRecord]:
+        target_limit = self.jargon_total_recall_count if limit is None else max(0, int(limit))
+        if target_limit <= 0:
             return []
 
         scope_id = self._get_event_scope_id(event)
@@ -812,7 +830,7 @@ class MyPlugin(Star):
             for item in hybrid_search(
                 query,
                 records,
-                self.jargon_recall_count,
+                target_limit,
                 embedding_scores=embedding_scores,
                 rrf_k=self.rrf_k,
             )
@@ -1249,16 +1267,21 @@ class MyPlugin(Star):
         
         # 1. 优先检索当前消息相关的黑话
         logger.debug(f"[myenhance] retrieving related jargon for current message with query: {event.get_sender_id()} {event.message_str}")
-        current_jargon = await self._get_related_jargon(event, f"{event.get_sender_id()} {event.message_str}")
-
-        # 1.1 检索当前询问相关记忆（注入 user_prompt，不注入 system_prompt）
-        current_memories = await self._get_related_memories(event, f"{event.get_sender_id()} {event.message_str}")
+        current_jargon = await self._get_related_jargon(
+            event,
+            f"{event.get_sender_id()} {event.message_str}",
+            limit=self.jargon_current_recall_count,
+        )
         
         # 2. 检索历史背景相关的黑话
         context_jargon = []
         context_memories = []
         if all_history_text:
-            context_jargon = await self._get_related_jargon(event, all_history_text)
+            context_jargon = await self._get_related_jargon(
+                event,
+                all_history_text,
+                limit=self.jargon_total_recall_count,
+            )
             context_memories = await self._get_related_memories(event, all_history_text)
             
         # 3. 合并黑话并去重，保持当前消息的相关黑话在前
@@ -1270,11 +1293,11 @@ class MyPlugin(Star):
                 seen_ids.add(m.id)
         
         # 限制最终注入的数量（取配置值）
-        jargons = jargons[:self.jargon_recall_count]
+        jargons = jargons[:self.jargon_total_recall_count]
 
         seen_memory_ids = set()
         memories: list[MemoryRecord] = []
-        for item in current_memories + context_memories:
+        for item in context_memories:
             if item.id in seen_memory_ids:
                 continue
             memories.append(item)
