@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.10")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.11")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -1396,10 +1396,6 @@ class MyPlugin(Star):
             return
         if event.get_sender_id() == event.get_self_id():
             return
-
-        scope_id = self._get_event_scope_id(event)
-        if scope_id:
-            await self._append_managed_context(scope_id, "user", self._format_member_message(event))
 
         await self._cache_recent_event(event)
 
