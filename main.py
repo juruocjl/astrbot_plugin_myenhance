@@ -215,14 +215,32 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             self.mod_max_mute_duration = 0
 
-        logger.debug(
-            "[myenhance] config: active_reply=%s prob=%.4f history=%s jargon_recall=%s jargon_max=%s",
-            self.active_reply_enable,
-            self.active_reply_probability,
-            self.history_inject_count,
-            self.jargon_recall_count,
-            self.jargon_max_records,
-        )
+        config_snapshot = {
+            "max_history": self.max_history,
+            "active_reply_enable": self.active_reply_enable,
+            "active_reply_probability": self.active_reply_probability,
+            "active_reply_whitelist": sorted(self.active_reply_whitelist),
+            "event_cache_size": self.event_cache_size,
+            "describe_image_provider_id": self.describe_image_provider_id,
+            "describe_image_ask": self.describe_image_ask,
+            "embedding_provider_id": self.embedding_provider_id,
+            "image_url_cache_size": self.image_url_cache_size,
+            "jargon_recall_count": self.jargon_recall_count,
+            "history_inject_count": self.history_inject_count,
+            "context_user_limit": self.context_user_limit,
+            "context_user_keep_after": self.context_user_keep_after,
+            "system_memory_inject_count": self.system_memory_inject_count,
+            "system_memory_cache_size": self.system_memory_cache_size,
+            "memory_recall_count": self.memory_recall_count,
+            "memory_max_records": self.memory_max_records,
+            "jargon_max_records": self.jargon_max_records,
+            "rrf_k": self.rrf_k,
+            "web_port": self.web_port,
+            "mod_api_url": self.mod_api_url,
+            "mod_auth_token": "***" if self.mod_auth_token else "",
+            "mod_max_mute_duration": self.mod_max_mute_duration,
+        }
+        logger.info("[myenhance] loaded config: %s", json.dumps(config_snapshot, ensure_ascii=False))
 
     def _get_group_lock(self, group_id: str) -> asyncio.Lock:
         lock = self.group_history_locks.get(group_id)
@@ -578,6 +596,7 @@ class MyPlugin(Star):
         for idx, ctx in enumerate(context_list):
             if self._get_context_role(ctx) == "user":
                 user_positions.append(idx)
+        logger.debug(f"[myenhance] context user positions: {user_positions}")
         if len(user_positions) < self.context_user_limit:
             return context_list
 
