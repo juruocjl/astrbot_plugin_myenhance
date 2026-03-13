@@ -35,6 +35,7 @@ from .flask_ui import start_flask_app
 @register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.14")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
+    HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     REFUSE_ONLY_RE = re.compile(r'^\s*<refuse\s*/>\s*$')
@@ -53,7 +54,7 @@ class MyPlugin(Star):
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
         self.scope_request_locks: dict[str, asyncio.Lock] = {}
-        self.managed_contexts_by_scope: dict[str, Deque[dict[str, str]]] = defaultdict(
+        self.managed_contexts_by_scope: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self.context_chain_max_records)
         )
         self.face_desc_map = load_face_desc_map()
@@ -305,16 +306,25 @@ class MyPlugin(Star):
         normalized_scope = str(scope_id or "").strip()
         if not normalized_scope:
             return
-        normalized: list[dict[str, str]] = []
+        normalized: list[dict[str, Any]] = []
         for ctx in contexts:
-            role = self._get_context_role(ctx)
+            if isinstance(ctx, dict):
+                role = str(ctx.get("role") or "").strip().lower()
+                if not role:
+                    continue
+                item = dict(ctx)
+                item["role"] = role
+                normalized.append(item)
+                continue
+
+            role = str(getattr(ctx, "role", "") or "").strip().lower()
             if not role:
                 continue
-            content = ctx.get("content") if isinstance(ctx, dict) else getattr(ctx, "content", None)
-            text = self._extract_context_text(content)
-            if not text:
-                continue
-            normalized.append({"role": role, "content": text})
+            item: dict[str, Any] = {"role": role}
+            for field in ("content", "name", "tool_call_id", "tool_calls"):
+                if hasattr(ctx, field):
+                    item[field] = getattr(ctx, field)
+            normalized.append(item)
 
         async with self._get_group_lock(normalized_scope):
             chain = deque(maxlen=self.context_chain_max_records)
@@ -322,7 +332,7 @@ class MyPlugin(Star):
             self.managed_contexts_by_scope[normalized_scope] = chain
             self._save_managed_contexts()
 
-    async def _get_managed_contexts(self, scope_id: str) -> list[dict[str, str]]:
+    async def _get_managed_contexts(self, scope_id: str) -> list[dict[str, Any]]:
         normalized_scope = str(scope_id or "").strip()
         if not normalized_scope:
             return []
@@ -596,7 +606,7 @@ class MyPlugin(Star):
         if not isinstance(scopes, dict):
             return
 
-        loaded: dict[str, Deque[dict[str, str]]] = defaultdict(
+        loaded: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self.context_chain_max_records)
         )
         for scope_id, items in scopes.items():
@@ -1504,19 +1514,16 @@ class MyPlugin(Star):
                 current_msg_id = getattr(event.message_obj, "message_id", "unknown")
                 role_label = " (admin)" if event.is_admin() else "(member)"
                 history_current_block = (
+                    f"{histroy_prompt}\n\n"
                     f"你的id是{bot_id}。\n"
                     f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
                     f"{original_prompt}\n"
                 )
 
+                req.contexts = self._inject_recent_memory_context_block(managed_contexts, scope_id)
                 await self._append_managed_context(scope_id, "user", history_current_block)
-                managed_contexts = await self._get_managed_contexts(scope_id)
-                base_contexts = list(req.contexts or [])
-                if not base_contexts:
-                    base_contexts = list(managed_contexts)
-                req.contexts = self._inject_recent_memory_context_block(base_contexts, scope_id)
+                
                 req.prompt = (
-                    f"{histroy_prompt}\n\n"
                     f"{history_current_block}"
                     "\n\n<MEMORY>\n"
                     f"{memory_prompt if memories else '暂无相关记忆。'}\n"
