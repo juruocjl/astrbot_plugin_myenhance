@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.0")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.1")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -57,6 +57,7 @@ class MyPlugin(Star):
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
         self.jargon_store_file = plugin_data_path / ".myenhance_jargons.json"
         self.memory_store_file = plugin_data_path / ".myenhance_memories.json"
+        self.temp_summary_prompt_file = plugin_data_path / ".myenhance_summary_prompt.tmp.txt"
         self.cache_manager = CacheManager(
             self.cache_state_file,
             self.max_history,
@@ -513,6 +514,10 @@ class MyPlugin(Star):
             return None
 
         prompt = f"{self.summary_prompt_template}\n\n{conversation}"
+        try:
+            self.temp_summary_prompt_file.write_text(prompt, encoding="utf-8")
+        except Exception as exc:
+            logger.warning("[myenhance] failed to write temp summary prompt file: %s", exc)
         try:
             response = await provider.text_chat(
                 prompt=prompt,
