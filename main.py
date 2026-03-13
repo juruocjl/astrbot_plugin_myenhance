@@ -8,7 +8,7 @@ import re
 import uuid
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
-from typing import Deque
+from typing import Any, Deque
 from urllib.parse import urljoin
 
 import httpx
@@ -26,12 +26,14 @@ from .utils.cache_manager import CacheManager
 from .utils.face_map import load_face_desc_map
 from .utils.hybrid_retrieval import hybrid_search
 from .utils.jargon_store import JargonRecord, JargonStore
+from .utils.memory_store import MemoryRecord, MemoryStore
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.7.12")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.0")
 class MyPlugin(Star):
+    MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     REFUSE_ONLY_RE = re.compile(r'^\s*<refuse\s*/>\s*$')
@@ -50,11 +52,11 @@ class MyPlugin(Star):
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
         self.face_desc_map = load_face_desc_map()
-
         plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         plugin_data_path.mkdir(parents=True, exist_ok=True)
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
         self.jargon_store_file = plugin_data_path / ".myenhance_jargons.json"
+        self.memory_store_file = plugin_data_path / ".myenhance_memories.json"
         self.cache_manager = CacheManager(
             self.cache_state_file,
             self.max_history,
@@ -67,6 +69,9 @@ class MyPlugin(Star):
             self.image_url_lru,
         )
         self.jargon_store = JargonStore(self.jargon_store_file, self.jargon_max_records)
+        self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
+        self.summary_prompt_template = self._load_summary_prompt_template()
+        self.jargon_prompt_rules = self._load_jargon_prompt_rules()
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
         self._flask_server = None
         self._flask_thread = None
@@ -86,45 +91,8 @@ class MyPlugin(Star):
                 self._flask_thread = None
 
     def _build_reply_system_prompt(self) -> str:
-        return (
-            "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。\n\n"
-            "第一步：请先检查当前对话内容和注入的上下文，判断是否有值得保存的稳定事实、约定，比如用户显式地告诉你缩写或黑称的含义。如果是，请立即调用 add_jargon 或 update_jargon。注意：黑话工具的调用不影响你对群聊回复的输出。\n\n"
-            "第二步：根据上下文回复消息。请优先引用要回复的消息。若可从上下文中确定目标消息 ID，使用 <quote id=\"msg_id\"/> 并且必须放在输出最开头。\n"
-            "每次只能引用一条消息。\n\n"
-            "当需要提及用户时，使用 <mention id=\"user_id\"/>，可提及多个用户。\n"
-            "注意你不应该直接输出用户ID，要提到用户时必须使用 mention 标签，且 mention 标签必须包含 id 属性，id 的值为用户ID。\n"
-            "user_id 可从消息格式 [nickname/user_id/time] 中提取。\n"
-            "mention 不是容器标签，绝对不要输出 </mention>。\n\n"
-            "quote 不是容器标签，绝对不要输出 </quote>。\n"
-            "若无法或不应回复，完整输出 <refuse/>，且前后不得有任何其他字符。\n\n"
-            "系统会注入两类上下文：\n"
-            "1. 与当前消息有关的黑话，格式为 <JARGON>[jargon-id] 内容；...</JARGON>\n"
-            "2. 最近历史消息，格式中包含 #msg消息ID 和消息内容。\n\n"
-
-            "当你发现某个群聊黑话值得保存时，并且不在<JARGON>块内，调用 add_jargon。\n"
-            "add_jargon 的参数 content 必须是一句对黑话的解释。\n"
-            "为了便于检索，你的 content 应当只包含需要的关键信息，不用包含更多的上下文信息，如发送人，时间，会话等不必要信息\n"
-            "keyword是用来检索的关键词，因此在编写 keyword 时使用空格分隔，所有关键词应当指代同一对象，也就是这条黑话的主体。\n"
-            "注意：若存在不在<JARGON>块内但值得保存的稳定事实、约定，请**务必**调用 add_jargon 添加黑话。\n"
-
-            "当已有黑话不准确、过期或需要修正时，调用 update_jargon。\n"
-            "update_jargon 需要传入 jargon_id 和新的 content。只能修改已给出的黑话 ID。\n\n"
-            "注意黑话中出现人物时，务必标注人物的ID，以便后续消息提及时能正确关联。\n\n"
-            "你**不需要**记录群内发生了什么事，你只需要用户教你事实时调用工具。"
-            "若用户的输入和你的黑话有偏差，请询问 admin 是否真实，你可以无条件相信 admin 给你提供的消息。\n"
-            "当你确信信息有偏差后，请**务必**调用 update_jargon 更新黑话。\n"
-            "出现的人物请**务必**记录下对应的ID，以便后续消息提及时能正确关联。\n"
-
-            "当你发现有重复的黑话，或者有和你当前确认的消息不一致的黑话时，请**务必**调用 delete_jargon 删除较简略的重复黑话，保留更详细的黑话。\n"
-            "你只会将完全确定的信息加入黑话管理库。\n"
-            
-            "当要回复的消息包含 [image] 时，先调用工具 describe_image。\n"
-            "工具参数规则：msgid 使用目标消息的编号，即 #msg 后面的 message_id，image_index 从 1 开始。\n"
-            "如果有多张图片，按需要多次调用 describe_image 再组织最终回复。\n\n"
-            "语言要求：始终使用聊天室当前主要语言回复。\n"
-            "除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。\n"
-            "管理员赋予了你禁言人的能力，当你忍无可忍时可以调用 mute_user 禁言捣乱的人，参数 user_id 是要禁言的用户ID，duration 是禁言时长，单位是秒，reason 是禁言理由，一般禁言一分钟警示一下即可。\n"
-        )
+        fallback = "你正在群聊中进行消息回复。你的整个输出必须是发给群聊的一条回复消息，不要输出额外说明。"
+        return self._load_text_asset("reply_system_prompt.txt", fallback)
 
     def _load_config(self) -> None:
         raw_max_history = self.config.get("max_history", 300)
@@ -180,6 +148,45 @@ class MyPlugin(Star):
             self.history_inject_count = max(0, int(raw_history_inject_count))
         except (TypeError, ValueError):
             self.history_inject_count = 12
+
+        raw_context_user_limit = self.config.get("context_user_limit", 12)
+        try:
+            self.context_user_limit = max(1, int(raw_context_user_limit))
+        except (TypeError, ValueError):
+            self.context_user_limit = 12
+
+        raw_context_user_keep_after = self.config.get("context_user_keep_after", 4)
+        try:
+            keep_after = int(raw_context_user_keep_after)
+        except (TypeError, ValueError):
+            keep_after = 4
+        keep_after = max(1, keep_after)
+        keep_after = min(keep_after, self.context_user_limit)
+        self.context_user_keep_after = keep_after
+
+        raw_system_memory_inject_count = self.config.get("system_memory_inject_count", 3)
+        try:
+            self.system_memory_inject_count = max(0, int(raw_system_memory_inject_count))
+        except (TypeError, ValueError):
+            self.system_memory_inject_count = 3
+
+        raw_system_memory_cache_size = self.config.get("system_memory_cache_size", 12)
+        try:
+            self.system_memory_cache_size = max(1, int(raw_system_memory_cache_size))
+        except (TypeError, ValueError):
+            self.system_memory_cache_size = 12
+
+        raw_memory_recall_count = self.config.get("memory_recall_count", 3)
+        try:
+            self.memory_recall_count = max(0, int(raw_memory_recall_count))
+        except (TypeError, ValueError):
+            self.memory_recall_count = 3
+
+        raw_memory_max_records = self.config.get("memory_max_records", 500)
+        try:
+            self.memory_max_records = max(1, int(raw_memory_max_records))
+        except (TypeError, ValueError):
+            self.memory_max_records = 500
 
         raw_jargon_max_records = self.config.get("jargon_max_records", 500)
         try:
@@ -429,6 +436,266 @@ class MyPlugin(Star):
         search_query = "\n".join(search_lines)
         return inject_lines, search_query
 
+    def _load_summary_prompt_template(self) -> str:
+        return self._load_text_asset("prompt.txt", "")
+
+    def _load_jargon_prompt_rules(self) -> str:
+        fallback = "请根据已注入黑话谨慎调用工具并回复消息。"
+        return self._load_text_asset("jargon_prompt_rules.txt", fallback)
+
+    def _load_text_asset(self, file_name: str, fallback: str = "") -> str:
+        asset_path = Path(__file__).parent / "assets" / file_name
+        if not asset_path.exists():
+            return fallback
+        try:
+            content = asset_path.read_text(encoding="utf-8").strip()
+            return content or fallback
+        except Exception as exc:
+            logger.warning("[myenhance] failed to load asset %s: %s", file_name, exc)
+            return fallback
+
+    def _get_context_role(self, ctx: Any) -> str:
+        if isinstance(ctx, dict):
+            return (ctx.get("role") or "").strip().lower()
+        return (getattr(ctx, "role", "") or "").strip().lower()
+
+    def _extract_context_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, dict):
+            parts = []
+            for key in ("content", "text"):
+                fragment = content.get(key)
+                fragment_text = self._extract_context_text(fragment)
+                if fragment_text:
+                    parts.append(fragment_text)
+            return "\n".join(parts).strip()
+        if isinstance(content, list):
+            parts = [self._extract_context_text(item) for item in content]
+            return "\n".join(part for part in parts if part).strip()
+        if hasattr(content, "text"):
+            return self._extract_context_text(getattr(content, "text"))
+        if hasattr(content, "content") and not isinstance(content, str):
+            return self._extract_context_text(getattr(content, "content"))
+        return ""
+
+    def _contexts_to_summary_text(self, contexts: list[Any]) -> str:
+        parts = []
+        allowed_roles = {"user", "assistant"}
+        for ctx in contexts:
+            role = self._get_context_role(ctx) or "user"
+            if role not in allowed_roles:
+                continue
+            if isinstance(ctx, dict):
+                content = ctx.get("content")
+            else:
+                content = getattr(ctx, "content", None)
+            text = self._extract_context_text(content)
+            if not text:
+                continue
+            parts.append(f"{role.capitalize()}: {text}")
+        return "\n".join(parts)
+
+    async def _summarize_context_blocks(
+        self,
+        event: AstrMessageEvent,
+        contexts: list[Any],
+    ) -> str | None:
+        if not contexts or not self.summary_prompt_template:
+            return None
+
+        conversation = self._contexts_to_summary_text(contexts)
+        if not conversation:
+            return None
+
+        provider = self.context.get_using_provider(event.unified_msg_origin)
+        if not provider:
+            return None
+
+        prompt = f"{self.summary_prompt_template}\n\n{conversation}"
+        try:
+            response = await provider.text_chat(
+                prompt=prompt,
+                session_id=uuid.uuid4().hex,
+                persist=False,
+            )
+        except Exception as exc:
+            logger.warning("[myenhance] failed to summarize contexts: %s", exc)
+            return None
+
+        text = (getattr(response, "completion_text", "") or "").strip()
+        return text or None
+
+    def _build_memory_keyword(self, summary_text: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(summary_text or "").strip())
+        if not normalized:
+            return "summary"
+        return normalized[:80]
+
+    async def _store_system_memory_entry(
+        self,
+        event: AstrMessageEvent,
+        scope_id: str,
+        summary_text: str,
+    ) -> None:
+        if not scope_id or not summary_text:
+            return
+        embedding = None
+        provider = self._get_embedding_provider()
+        if provider:
+            try:
+                embedding = await provider.get_embedding(summary_text)
+            except Exception as exc:
+                logger.warning("[myenhance] failed to get embedding for memory summary: %s", exc)
+
+        keyword = self._build_memory_keyword(summary_text)
+        try:
+            self.memory_store.add_memory(
+                scope_id,
+                summary_text.strip(),
+                keyword=keyword,
+                embedding=embedding,
+            )
+        except ValueError as exc:
+            logger.warning("[myenhance] failed to persist memory summary: %s", exc)
+
+    async def _apply_context_memory_management(
+        self,
+        event: AstrMessageEvent,
+        scope_id: str,
+        contexts: list[Any] | None,
+    ) -> list[Any]:
+        if not contexts or self.context_user_limit <= 0:
+            return list(contexts or [])
+
+        context_list = list(contexts)
+        user_positions: list[int] = []
+        for idx, ctx in enumerate(context_list):
+            if self._get_context_role(ctx) == "user":
+                user_positions.append(idx)
+        if len(user_positions) < self.context_user_limit:
+            return context_list
+
+        keep_threshold = min(len(user_positions), max(1, self.context_user_keep_after))
+        keep_start_idx = user_positions[keep_threshold - 1]
+        if keep_start_idx <= 0:
+            return context_list
+
+        summary_contexts = context_list[:keep_start_idx]
+        kept_contexts = context_list[keep_start_idx:]
+        summary_text = await self._summarize_context_blocks(event, summary_contexts)
+        if summary_text and scope_id:
+            await self._store_system_memory_entry(event, scope_id, summary_text)
+            logger.info(
+                "[myenhance] summarized %d contexts into system memory for scope %s",
+                len(summary_contexts),
+                scope_id,
+            )
+        return kept_contexts
+
+    def _append_system_memory_to_prompt(
+        self,
+        scope_id: str,
+        base_prompt: str | None,
+    ) -> str | None:
+        if not scope_id or self.system_memory_inject_count <= 0:
+            return base_prompt
+        records = self.memory_store.list_memories(scope_id)
+        if not records:
+            return base_prompt
+        block_entries = records[-self.system_memory_inject_count :]
+        lines = "\n".join(f"- {entry.content}" for entry in block_entries)
+        memory_block = f"最近记忆回顾：\n{lines}"
+        if base_prompt:
+            return f"{base_prompt}\n\n{memory_block}"
+        return memory_block
+
+    def _remove_injected_memory_context_block(self, contexts: list[Any] | None) -> list[Any]:
+        if not contexts:
+            return []
+
+        kept: list[Any] = []
+        marker = self.MEMORY_CONTEXT_MARKER
+        for ctx in contexts:
+            role = self._get_context_role(ctx)
+            content = ctx.get("content") if isinstance(ctx, dict) else getattr(ctx, "content", None)
+            text = self._extract_context_text(content)
+            if role == "user" and marker in text:
+                continue
+            kept.append(ctx)
+        return kept
+
+    def _build_recent_memory_context_block(self, scope_id: str, limit: int = 5) -> str | None:
+        records = self.memory_store.list_memories(scope_id)
+        if not records:
+            return None
+
+        selected = records[-max(1, limit) :]
+        lines = [f"- [{record.id}] {record.content}" for record in selected]
+        return (
+            f"{self.MEMORY_CONTEXT_MARKER}\n"
+            "以下是最近记忆（按时间从旧到新，供上下文参考）：\n"
+            f"{'\n'.join(lines)}"
+        )
+
+    def _inject_recent_memory_context_block(self, contexts: list[Any] | None, scope_id: str) -> list[Any]:
+        context_list = list(contexts or [])
+        block = self._build_recent_memory_context_block(scope_id, limit=5)
+        if not block:
+            return context_list
+
+        context_list.append({"role": "user", "content": block})
+        return context_list
+
+    def _clean_injected_context_blocks(self, contexts: list[Any] | None, tags: list[str]) -> list[str]:
+        if not contexts or not tags:
+            return []
+
+        role_chain: list[str] = []
+        patterns = {
+            tag: re.compile(rf"<{tag}>.*?</{tag}>", re.DOTALL)
+            for tag in tags
+        }
+
+        def clean_text(text: str) -> str:
+            cleaned = text
+            for tag in tags:
+                if f"<{tag}>" in cleaned:
+                    cleaned = patterns[tag].sub("", cleaned)
+            return cleaned.strip()
+
+        for ctx in contexts:
+            if isinstance(ctx, dict):
+                role = str(ctx.get("role", "") or "")
+                role_chain.append(role)
+                content = ctx.get("content")
+                if isinstance(content, str):
+                    ctx["content"] = clean_text(content)
+                elif isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text = item.get("text", "")
+                            if isinstance(text, str):
+                                item["text"] = clean_text(text)
+            elif hasattr(ctx, "content"):
+                role = str(getattr(ctx, "role", "") or "")
+                role_chain.append(role)
+                content = ctx.content
+                if isinstance(content, str):
+                    ctx.content = clean_text(content)
+                elif isinstance(content, list):
+                    for item in content:
+                        if (isinstance(item, dict) and item.get("type") == "text") or \
+                           (hasattr(item, "type") and getattr(item, "type") == "text"):
+                            text = item.get("text") if isinstance(item, dict) else getattr(item, "text", "")
+                            if isinstance(text, str):
+                                cleaned_text = clean_text(text)
+                                if isinstance(item, dict):
+                                    item["text"] = cleaned_text
+                                else:
+                                    setattr(item, "text", cleaned_text)
+        return role_chain
+
     def _get_embedding_provider(self):
         if not self.embedding_provider_id:
             return None
@@ -448,7 +715,7 @@ class MyPlugin(Star):
             return None
         return provider
 
-    async def _build_embedding_scores(self, query: str, records: list[JargonRecord]) -> list[float] | None:
+    async def _build_embedding_scores(self, query: str, records: list[Any]) -> list[float] | None:
         provider = self._get_embedding_provider()
         if not provider or not records:
             return None
@@ -500,7 +767,7 @@ class MyPlugin(Star):
         dot = sum(left_value * right_value for left_value, right_value in zip(left, right))
         return dot / (left_norm * right_norm)
 
-    async def _get_related_jargon(self, event: AstrMessageEvent, query: str):
+    async def _get_related_jargon(self, event: AstrMessageEvent, query: str) -> list[JargonRecord]:
         if self.jargon_recall_count <= 0:
             return []
 
@@ -522,6 +789,33 @@ class MyPlugin(Star):
                 query,
                 records,
                 self.jargon_recall_count,
+                embedding_scores=embedding_scores,
+                rrf_k=self.rrf_k,
+            )
+        ]
+
+    async def _get_related_memories(self, event: AstrMessageEvent, query: str) -> list[MemoryRecord]:
+        if self.memory_recall_count <= 0:
+            return []
+
+        scope_id = self._get_event_scope_id(event)
+        if not scope_id:
+            return []
+
+        records = self.memory_store.list_memories(scope_id)
+        if not records:
+            return []
+
+        embedding_scores = await self._build_embedding_scores(
+            query,
+            records,
+        )
+        return [
+            item.record
+            for item in hybrid_search(
+                query,
+                records,
+                self.memory_recall_count,
                 embedding_scores=embedding_scores,
                 rrf_k=self.rrf_k,
             )
@@ -909,6 +1203,15 @@ class MyPlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ):
+        scope_id = self._get_event_scope_id(event)
+        req.contexts = self._remove_injected_memory_context_block(req.contexts)
+        req.contexts = await self._apply_context_memory_management(
+            event,
+            scope_id,
+            req.contexts,
+        )
+        req.contexts = self._inject_recent_memory_context_block(req.contexts, scope_id)
+
         req.system_prompt = (
             f"{req.system_prompt}\n\n{self.reply_system_prompt_cn}"
             if req.system_prompt
@@ -920,14 +1223,19 @@ class MyPlugin(Star):
         # 获取用于注入的历史消息和用于检索的全部消息文本
         history_lines, all_history_text = await self._get_recent_history_lines(event)
         
-        # 1. 优先检索当前消息相关的记忆
+        # 1. 优先检索当前消息相关的黑话
         logger.debug(f"[myenhance] retrieving related jargon for current message with query: {event.get_sender_id()} {event.message_str}")
         current_jargon = await self._get_related_jargon(event, f"{event.get_sender_id()} {event.message_str}")
+
+        # 1.1 检索当前询问相关记忆（注入 user_prompt，不注入 system_prompt）
+        current_memories = await self._get_related_memories(event, f"{event.get_sender_id()} {event.message_str}")
         
         # 2. 检索历史背景相关的黑话
         context_jargon = []
+        context_memories = []
         if all_history_text:
             context_jargon = await self._get_related_jargon(event, all_history_text)
+            context_memories = await self._get_related_memories(event, all_history_text)
             
         # 3. 合并黑话并去重，保持当前消息的相关黑话在前
         seen_ids = set()
@@ -939,47 +1247,24 @@ class MyPlugin(Star):
         
         # 限制最终注入的数量（取配置值）
         jargons = jargons[:self.jargon_recall_count]
+
+        seen_memory_ids = set()
+        memories: list[MemoryRecord] = []
+        for item in current_memories + context_memories:
+            if item.id in seen_memory_ids:
+                continue
+            memories.append(item)
+            seen_memory_ids.add(item.id)
+        memories = memories[:self.memory_recall_count]
+
         role_chain = []
-        # 清理历史上下文中的 <JARGON> 块，避免模型受到旧黑话干扰
-        if req.contexts:
-            import re
-            mem_pattern = re.compile(r"<JARGON>.*?</JARGON>", re.DOTALL)
-            for ctx in req.contexts:
-                if isinstance(ctx, dict):
-                    role = ctx.get("role", "")
-                    role_chain.append(role)
-                    content = ctx.get("content")
-                    if isinstance(content, str):
-                        if "<JARGON>" in content:
-                            ctx["content"] = mem_pattern.sub("", content).strip()
-                    elif isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "text":
-                                text = item.get("text", "")
-                                if isinstance(text, str) and "<JARGON>" in text:
-                                    item["text"] = mem_pattern.sub("", text).strip()
-                elif hasattr(ctx, "content"):
-                    role = getattr(ctx, "role", "")
-                    role_chain.append(role)
-                    content = ctx.content
-                    if isinstance(content, str):
-                        if "<JARGON>" in content:
-                            ctx.content = mem_pattern.sub("", content).strip()
-                    elif isinstance(content, list):
-                        for item in content:
-                            if (isinstance(item, dict) and item.get("type") == "text") or \
-                               (hasattr(item, "type") and getattr(item, "type") == "text"):
-                                
-                                text = item.get("text") if isinstance(item, dict) else getattr(item, "text", "")
-                                if isinstance(text, str) and "<JARGON>" in text:
-                                    if isinstance(item, dict):
-                                        item["text"] = mem_pattern.sub("", text).strip()
-                                    else:
-                                        setattr(item, "text", mem_pattern.sub("", text).strip())
+        # 清理历史上下文中的 <JARGON>/<MEMORY> 块，避免模型受到旧注入干扰
+        role_chain = self._clean_injected_context_blocks(req.contexts, ["JARGON", "MEMORY"])
         logger.debug(f"[myenhance] message chain: {role_chain}")
 
         histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
         jargon_prompt = "相关黑话：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in jargons)
+        memory_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
 
         bot_id = self._get_bot_id(event)
         current_msg_id = getattr(event.message_obj, "message_id", "unknown")
@@ -989,21 +1274,21 @@ class MyPlugin(Star):
             f"你的id是{bot_id}。\n"
             f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
             f"{original_prompt}\n\n"
+            "<MEMORY>\n"
+            f"{memory_prompt if memories else '暂无相关记忆。'}\n"
+            "</MEMORY>\n\n"
             "<JARGON>\n"
             "以下是相关黑话："
             f"{jargon_prompt}"
             "\n=====\n"
-            "请回忆黑话管理完整流程：1. 检查是否删除重复黑话或错误黑话 2. 检查是否要更改黑话，没有改动请不要调用 3. 检查是否要新增黑话\n"
-            "如果是待确认的内容，你**不应该调用任何工具**更改黑话。\n"
-            "注意如果你选择先更改黑话，那么**不应该输出任何内容**来回复消息，当工具调用完成再进行回复。\n"
-            "如果你已经回复过，那么你**禁止**再回复相同内容。\n"
-            "所有关键词都应当是指代同一对象的不同说法。\n"
+            f"{self.jargon_prompt_rules}\n"
             "=====\n"
             "</JARGON>"
         )
 
         logger.info(
-            "[myenhance] injected %s related jargon entries and %s history messages",
+            "[myenhance] injected %s related memories, %s related jargon entries and %s history messages",
+            len(memories),
             len(jargons),
             len(history_lines),
         )

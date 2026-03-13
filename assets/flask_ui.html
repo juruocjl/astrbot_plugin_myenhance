@@ -1,0 +1,315 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>MyEnhance Dashboard</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://cdn.bootcdn.net/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding: 20px; background-color: #f8f9fa; }
+        .item-card { margin-bottom: 12px; }
+        .scope-header { background: #e9ecef; padding: 10px; border-radius: 6px; margin-top: 18px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 class="mb-4">MyEnhance Jargon + Memory</h2>
+
+        <div class="card mb-3">
+            <div class="card-body">
+                <h5 class="card-title mb-3">Search Jargon</h5>
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label">Scope</label>
+                        <select class="form-select" id="scopeSelect" disabled>
+                            <option value="">No scope</option>
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label">Query</label>
+                        <input type="text" class="form-control" id="searchQuery" placeholder="Keywords or sentence">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label">Limit</label>
+                        <input type="number" class="form-control" id="searchLimit" value="5" min="1" max="50">
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-primary w-100" id="search-button" onclick="searchJargon()">Search</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="search-results" class="mb-4"></div>
+
+        <div class="scope-header"><h5 class="mb-0">Jargon</h5></div>
+        <div id="content"><div class="text-muted">Loading...</div></div>
+
+        <div class="scope-header"><h5 class="mb-0">Memory</h5></div>
+        <div id="memory-content"><div class="text-muted">Loading...</div></div>
+    </div>
+
+    <script>
+        function escapeHtml(value = "") {
+            return String(value)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+        }
+
+        function escapeAttr(value = "") {
+            return escapeHtml(value)
+                .replace(/\"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        let cachedScopes = {};
+
+        function populateScopeSelect(scopes) {
+            const scopeSelect = document.getElementById('scopeSelect');
+            if (!scopeSelect) return;
+            cachedScopes = scopes || {};
+            scopeSelect.innerHTML = '';
+            const entries = Object.keys(cachedScopes);
+            if (!entries.length) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No scope';
+                scopeSelect.appendChild(option);
+                scopeSelect.disabled = true;
+                return;
+            }
+            entries.forEach((scope) => {
+                const option = document.createElement('option');
+                option.value = scope;
+                option.textContent = scope;
+                scopeSelect.appendChild(option);
+            });
+            scopeSelect.disabled = false;
+        }
+
+        function renderSearchResults(results, message = '') {
+            const container = document.getElementById('search-results');
+            if (!container) return;
+            if (!results || !results.length) {
+                container.innerHTML = `<div class="alert alert-secondary">${escapeHtml(message || 'No results')}</div>`;
+                return;
+            }
+            container.innerHTML = results.map((item) => `
+                <div class="card item-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <p class="mb-1"><strong>Keyword:</strong> ${escapeHtml(item.keyword || '')}</p>
+                                <p class="mb-1">${escapeHtml(item.content || '')}</p>
+                                <small class="text-muted">ID: ${escapeHtml(item.id || '')} | Updated: ${escapeHtml(item.updated_at || '')}</small>
+                            </div>
+                            <div class="text-end">
+                                <div><strong>${Number(item.score ?? 0).toFixed(6)}</strong></div>
+                                <div><small>bm25 ${Number(item.bm25_score ?? 0).toFixed(6)}</small></div>
+                                <div><small>embed ${Number(item.embedding_score ?? 0).toFixed(6)}</small></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function searchJargon() {
+            const scope = (document.getElementById('scopeSelect') || {}).value || '';
+            const query = (document.getElementById('searchQuery') || {}).value || '';
+            const limitInput = document.getElementById('searchLimit');
+            const button = document.getElementById('search-button');
+            if (!scope) return alert('Please choose scope');
+            if (!query.trim()) return alert('Please input query');
+            let limit = parseInt((limitInput && limitInput.value) || '5', 10);
+            if (Number.isNaN(limit) || limit < 1) limit = 5;
+            limit = Math.min(limit, 50);
+            if (button) { button.disabled = true; button.textContent = 'Searching...'; }
+            try {
+                const resp = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({scope, query: query.trim(), limit})
+                });
+                const data = await resp.json();
+                renderSearchResults(data.results || [], data.msg || 'Done');
+            } catch (e) {
+                renderSearchResults([], 'Search failed');
+            } finally {
+                if (button) { button.disabled = false; button.textContent = 'Search'; }
+            }
+        }
+
+        async function loadJargon() {
+            const resp = await fetch('/api/list');
+            const data = await resp.json();
+            const content = document.getElementById('content');
+            const scopes = data.scopes || {};
+            const entries = Object.entries(scopes);
+            if (!entries.length) {
+                content.innerHTML = '<div class="alert alert-info">No jargon data</div>';
+                populateScopeSelect({});
+                return;
+            }
+
+            let html = '';
+            for (const [scope, records] of entries) {
+                const scopeAttr = escapeAttr(scope);
+                html += `<div class="scope-header"><h6 class="mb-0">Scope: ${escapeHtml(scope)} <span class="badge bg-secondary">${records.length}</span></h6></div>`;
+                records.forEach((r) => {
+                    const idAttr = escapeAttr(r.id || '');
+                    const contentData = encodeURIComponent(r.content || '');
+                    const keywordData = encodeURIComponent(r.keyword || '');
+                    html += `
+                        <div class="card item-card">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between">
+                                    <h6 class="card-subtitle mb-2 text-muted">ID: ${escapeHtml(r.id || '')} | Updated: ${escapeHtml(r.updated_at || '')}</h6>
+                                    <div>
+                                        <button class="btn btn-sm btn-outline-primary" data-scope="${scopeAttr}" data-id="${idAttr}" data-content="${contentData}" data-keyword="${keywordData}" onclick="editJargon(this)">Edit</button>
+                                        <button class="btn btn-sm btn-outline-danger" data-scope="${scopeAttr}" data-id="${idAttr}" onclick="deleteJargon(this)">Delete</button>
+                                    </div>
+                                </div>
+                                <p class="mb-1"><strong>Keyword:</strong> ${escapeHtml(r.keyword || '')}</p>
+                                <p class="mb-0">${escapeHtml(r.content || '')}</p>
+                            </div>
+                        </div>`;
+                });
+            }
+            content.innerHTML = html;
+            populateScopeSelect(scopes);
+        }
+
+        async function editJargon(button) {
+            const scope = button?.dataset?.scope;
+            const id = button?.dataset?.id;
+            if (!scope || !id) return alert('Missing target');
+            const oldContent = decodeURIComponent(button.dataset.content || '');
+            const oldKeyword = decodeURIComponent(button.dataset.keyword || '');
+            const keyword = prompt('Keyword:', oldKeyword || '');
+            if (keyword === null) return;
+            const content = prompt('Content:', oldContent || '');
+            if (content === null) return;
+            const resp = await fetch('/api/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({scope, id, content, keyword})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadJargon();
+        }
+
+        async function deleteJargon(button) {
+            const scope = button?.dataset?.scope;
+            const id = button?.dataset?.id;
+            if (!scope || !id) return alert('Missing target');
+            if (!confirm('Delete this jargon?')) return;
+            const resp = await fetch('/api/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({scope, id})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadJargon();
+        }
+
+        async function loadMemory() {
+            const container = document.getElementById('memory-content');
+            const resp = await fetch('/api/memory/list');
+            const data = await resp.json();
+            const scopes = data.scopes || {};
+            const entries = Object.entries(scopes);
+            if (!entries.length) {
+                container.innerHTML = '<div class="alert alert-info">No memory data</div>';
+                return;
+            }
+
+            let html = '';
+            for (const [scope, records] of entries) {
+                const scopeAttr = escapeAttr(scope);
+                html += `<div class="scope-header d-flex justify-content-between align-items-center"><h6 class="mb-0">Scope: ${escapeHtml(scope)} <span class="badge bg-secondary">${records.length}</span></h6><button class="btn btn-sm btn-outline-success" data-scope="${scopeAttr}" onclick="addMemory(this)">Add Memory</button></div>`;
+                records.forEach((record) => {
+                    const idAttr = escapeAttr(record.id || '');
+                    const contentData = encodeURIComponent(record.content || '');
+                    const keywordData = encodeURIComponent(record.keyword || '');
+                    html += `
+                        <div class="card item-card">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between">
+                                    <h6 class="card-subtitle mb-2 text-muted">ID: ${escapeHtml(record.id || '')} | Updated: ${escapeHtml(record.updated_at || '')}</h6>
+                                    <div>
+                                        <button class="btn btn-sm btn-outline-primary" data-scope="${scopeAttr}" data-id="${idAttr}" data-content="${contentData}" data-keyword="${keywordData}" onclick="editMemory(this)">Edit</button>
+                                        <button class="btn btn-sm btn-outline-danger" data-scope="${scopeAttr}" data-id="${idAttr}" onclick="deleteMemory(this)">Delete</button>
+                                    </div>
+                                </div>
+                                <p class="mb-1"><strong>Keyword:</strong> ${escapeHtml(record.keyword || '')}</p>
+                                <p class="mb-0">${escapeHtml(record.content || '')}</p>
+                            </div>
+                        </div>`;
+                });
+            }
+            container.innerHTML = html;
+        }
+
+        async function addMemory(button) {
+            const scope = button?.dataset?.scope;
+            if (!scope) return alert('Missing scope');
+            const keyword = prompt('Keyword (optional):', '');
+            if (keyword === null) return;
+            const content = prompt('Memory content:', '');
+            if (content === null) return;
+            if (!content.trim()) return alert('Content required');
+            const resp = await fetch('/api/memory/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({scope, keyword, content})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadMemory();
+        }
+
+        async function editMemory(button) {
+            const scope = button?.dataset?.scope;
+            const id = button?.dataset?.id;
+            if (!scope || !id) return alert('Missing target');
+            const oldContent = decodeURIComponent(button.dataset.content || '');
+            const oldKeyword = decodeURIComponent(button.dataset.keyword || '');
+            const keyword = prompt('Keyword:', oldKeyword || '');
+            if (keyword === null) return;
+            const content = prompt('Content:', oldContent || '');
+            if (content === null) return;
+            if (!content.trim()) return alert('Content required');
+            const resp = await fetch('/api/memory/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({scope, id, keyword, content})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadMemory();
+        }
+
+        async function deleteMemory(button) {
+            const scope = button?.dataset?.scope;
+            const id = button?.dataset?.id;
+            if (!scope || !id) return alert('Missing target');
+            if (!confirm('Delete this memory?')) return;
+            const resp = await fetch('/api/memory/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({scope, id})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadMemory();
+        }
+
+        loadJargon();
+        loadMemory();
+    </script>
+</body>
+</html>
