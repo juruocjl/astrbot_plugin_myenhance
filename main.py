@@ -571,6 +571,11 @@ class MyPlugin(Star):
                     remaining_items.append((item_ts, item_msg_id, line))
             history.clear()
             history.extend(remaining_items)
+        self.cache_manager.save_cache_state(
+            self.group_histories,
+            self.recent_events,
+            self.image_url_lru,
+        )
         inject_lines = history_lines[-self.history_inject_count :] if self.history_inject_count > 0 else []
         search_query = "\n".join(search_lines)
         return inject_lines, search_query
