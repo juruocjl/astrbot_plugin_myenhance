@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.9")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.10")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -1510,6 +1510,9 @@ class MyPlugin(Star):
                 histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
                 jargon_prompt = "相关黑话：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in jargons)
                 memory_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
+                bot_id = self._get_bot_id(event)
+                current_msg_id = getattr(event.message_obj, "message_id", "unknown")
+                role_label = " (admin)" if event.is_admin() else "(member)"
                 history_current_block = (
                     f"{histroy_prompt}\n\n"
                     f"你的id是{bot_id}。\n"
@@ -1519,10 +1522,6 @@ class MyPlugin(Star):
 
                 await self._append_managed_context(scope_id, "user", history_current_block)
                 req.contexts = []
-
-                bot_id = self._get_bot_id(event)
-                current_msg_id = getattr(event.message_obj, "message_id", "unknown")
-                role_label = " (admin)" if event.is_admin() else "(member)"
                 req.prompt = (
                     f"{history_current_block}"
                     "\n\n<MEMORY>\n"
