@@ -1498,8 +1498,8 @@ class MyPlugin(Star):
                     f"{original_prompt}\n"
                 )
 
-                await self._append_managed_context(scope_id, "user", history_current_block)
-                req.contexts = self._inject_recent_memory_context_block([], scope_id)
+                managed_contexts = await self._get_managed_contexts(scope_id)
+                req.contexts = self._inject_recent_memory_context_block(managed_contexts, scope_id)
                 req.prompt = (
                     f"{history_current_block}"
                     "\n\n<MEMORY>\n"
@@ -1513,6 +1513,7 @@ class MyPlugin(Star):
                     "=====\n"
                     "</JARGON>"
                 )
+                await self._append_managed_context(scope_id, "user", history_current_block)
 
                 logger.info(
                     "[myenhance] injected %s related memories, %s related jargon entries and %s history messages",
