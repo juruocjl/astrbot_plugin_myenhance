@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import math
 import random
@@ -886,7 +887,18 @@ class MyPlugin(Star):
         )
 
     def _inject_recent_memory_context_block(self, contexts: list[Any] | None, scope_id: str) -> list[Any]:
-        context_list = list(contexts or [])
+        context_list = copy.deepcopy(list(contexts or []))
+        marker = self.MEMORY_CONTEXT_MARKER
+        context_list = [
+            ctx
+            for ctx in context_list
+            if not (
+                self._get_context_role(ctx) == "user"
+                and marker in self._extract_context_text(
+                    ctx.get("content") if isinstance(ctx, dict) else getattr(ctx, "content", None)
+                )
+            )
+        ]
         block = self._build_recent_memory_context_block(scope_id, limit=5)
         if not block:
             return context_list
@@ -1492,7 +1504,6 @@ class MyPlugin(Star):
                 current_msg_id = getattr(event.message_obj, "message_id", "unknown")
                 role_label = " (admin)" if event.is_admin() else "(member)"
                 history_current_block = (
-                    f"{histroy_prompt}\n\n"
                     f"你的id是{bot_id}。\n"
                     f"请回复下面这条消息{role_label}（#msg{current_msg_id}）:\n"
                     f"{original_prompt}\n"
@@ -1505,6 +1516,7 @@ class MyPlugin(Star):
                     base_contexts = list(managed_contexts)
                 req.contexts = self._inject_recent_memory_context_block(base_contexts, scope_id)
                 req.prompt = (
+                    f"{histroy_prompt}\n\n"
                     f"{history_current_block}"
                     "\n\n<MEMORY>\n"
                     f"{memory_prompt if memories else '暂无相关记忆。'}\n"
