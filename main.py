@@ -283,48 +283,46 @@ class MyPlugin(Star):
         lock = self.scope_request_locks.get(scope_id)
         return bool(lock and lock.locked())
 
-    async def _append_managed_context(self, scope_id: str, role: str, content: str) -> None:
+    def _context_to_dict(self, ctx: Any) -> dict[str, Any] | None:
+        if isinstance(ctx, dict):
+            role = str(ctx.get("role") or "").strip().lower()
+            if not role:
+                return None
+            item = dict(ctx)
+            item["role"] = role
+            return item
+
+        role = str(getattr(ctx, "role", "") or "").strip().lower()
+        if not role:
+            return None
+        item: dict[str, Any] = {"role": role}
+        for field in ("content", "name", "tool_call_id", "tool_calls"):
+            if hasattr(ctx, field):
+                item[field] = getattr(ctx, field)
+        return item
+
+    async def _append_managed_context(self, scope_id: str, context: Any) -> None:
         normalized_scope = str(scope_id or "").strip()
-        normalized_role = str(role or "").strip().lower()
-        normalized_content = str(content or "").strip()
-        if not normalized_scope or not normalized_role or not normalized_content:
+        item = self._context_to_dict(context)
+        if not normalized_scope or not item:
             return
 
         async with self._get_group_lock(normalized_scope):
             chain = self.managed_contexts_by_scope[normalized_scope]
-            if chain:
-                last_item = chain[-1]
-                if (
-                    last_item.get("role") == normalized_role
-                    and last_item.get("content") == normalized_content
-                ):
+            if chain and chain[-1] == item:
                     return
-            chain.append({"role": normalized_role, "content": normalized_content})
+            chain.append(item)
             self._save_managed_contexts()
 
     async def _replace_managed_contexts(self, scope_id: str, contexts: list[Any]) -> None:
         normalized_scope = str(scope_id or "").strip()
         if not normalized_scope:
             return
-        normalized: list[dict[str, Any]] = []
-        for ctx in contexts:
-            if isinstance(ctx, dict):
-                role = str(ctx.get("role") or "").strip().lower()
-                if not role:
-                    continue
-                item = dict(ctx)
-                item["role"] = role
-                normalized.append(item)
-                continue
-
-            role = str(getattr(ctx, "role", "") or "").strip().lower()
-            if not role:
-                continue
-            item: dict[str, Any] = {"role": role}
-            for field in ("content", "name", "tool_call_id", "tool_calls"):
-                if hasattr(ctx, field):
-                    item[field] = getattr(ctx, field)
-            normalized.append(item)
+        normalized = [
+            item
+            for item in (self._context_to_dict(ctx) for ctx in contexts)
+            if item is not None
+        ]
 
         async with self._get_group_lock(normalized_scope):
             chain = deque(maxlen=self.context_chain_max_records)
@@ -342,20 +340,15 @@ class MyPlugin(Star):
                 return []
             return [dict(item) for item in chain]
 
-    def _extract_new_context_after_last_user(self, contexts: list[Any] | None) -> list[dict[str, str]]:
+    def _extract_new_context_after_last_user(self, contexts: list[Any] | None) -> list[dict[str, Any]]:
         if not contexts:
             return []
 
-        normalized: list[dict[str, str]] = []
-        for ctx in contexts:
-            role = self._get_context_role(ctx)
-            if not role:
-                continue
-            content = ctx.get("content") if isinstance(ctx, dict) else getattr(ctx, "content", None)
-            text = self._extract_context_text(content)
-            if not text:
-                continue
-            normalized.append({"role": role, "content": text})
+        normalized = [
+            item
+            for item in (self._context_to_dict(ctx) for ctx in contexts)
+            if item is not None
+        ]
 
         if not normalized:
             return []
@@ -1453,7 +1446,7 @@ class MyPlugin(Star):
                 # 将框架上下文中“最后一个 user 之后”的新增内容并入自维护上下文（可包含工具调用等信息）。
                 incremental_contexts = self._extract_new_context_after_last_user(req.contexts)
                 for item in incremental_contexts:
-                    await self._append_managed_context(scope_id, item["role"], item["content"])
+                    await self._append_managed_context(scope_id, item)
 
                 managed_contexts = await self._get_managed_contexts(scope_id)
                 managed_contexts = await self._apply_context_memory_management(
@@ -1526,7 +1519,10 @@ class MyPlugin(Star):
                 )
 
                 req.contexts = self._inject_recent_memory_context_block(managed_contexts, scope_id)
-                await self._append_managed_context(scope_id, "user", history_current_block)
+                await self._append_managed_context(
+                    scope_id,
+                    {"role": "user", "content": history_current_block},
+                )
                 
                 req.prompt = (
                     f"{history_current_block}"
