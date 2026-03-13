@@ -17,7 +17,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType
 from astrbot.api.message_components import At, Plain, Reply
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.7")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.8")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -62,6 +62,7 @@ class MyPlugin(Star):
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
         self.jargon_store_file = plugin_data_path / ".myenhance_jargons.json"
         self.memory_store_file = plugin_data_path / ".myenhance_memories.json"
+        self.managed_contexts_file = plugin_data_path / ".myenhance_contexts.json"
         self.temp_summary_prompt_file = plugin_data_path / ".myenhance_summary_prompt.tmp.txt"
         self.cache_manager = CacheManager(
             self.cache_state_file,
@@ -76,6 +77,7 @@ class MyPlugin(Star):
         )
         self.jargon_store = JargonStore(self.jargon_store_file, self.jargon_max_records)
         self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
+        self._load_managed_contexts()
         self.summary_prompt_template = self._load_summary_prompt_template()
         self.jargon_prompt_rules = self._load_jargon_prompt_rules()
         self.reply_system_prompt_cn = self._build_reply_system_prompt()
@@ -86,6 +88,7 @@ class MyPlugin(Star):
             self.stop_flask = start_flask_app(self, self.web_port)
 
     async def terminate(self) -> None:
+        self._save_managed_contexts()
         if self.stop_flask:
             try:
                 self.stop_flask()
@@ -289,6 +292,7 @@ class MyPlugin(Star):
             self.managed_contexts_by_scope[normalized_scope].append(
                 {"role": normalized_role, "content": normalized_content}
             )
+            self._save_managed_contexts()
 
     async def _replace_managed_contexts(self, scope_id: str, contexts: list[Any]) -> None:
         normalized_scope = str(scope_id or "").strip()
@@ -309,6 +313,7 @@ class MyPlugin(Star):
             chain = deque(maxlen=self.context_chain_max_records)
             chain.extend(normalized)
             self.managed_contexts_by_scope[normalized_scope] = chain
+            self._save_managed_contexts()
 
     async def _get_managed_contexts(self, scope_id: str) -> list[dict[str, str]]:
         normalized_scope = str(scope_id or "").strip()
@@ -543,6 +548,54 @@ class MyPlugin(Star):
         except Exception as exc:
             logger.warning("[myenhance] failed to load asset %s: %s", file_name, exc)
             return fallback
+
+    def _load_managed_contexts(self) -> None:
+        if not self.managed_contexts_file.exists():
+            return
+        try:
+            data = json.loads(self.managed_contexts_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[myenhance] failed to load managed contexts: %s", exc)
+            return
+
+        scopes = data.get("scopes", {})
+        if not isinstance(scopes, dict):
+            return
+
+        loaded: dict[str, Deque[dict[str, str]]] = defaultdict(
+            lambda: deque(maxlen=self.context_chain_max_records)
+        )
+        for scope_id, items in scopes.items():
+            if not isinstance(scope_id, str) or not isinstance(items, list):
+                continue
+            chain = deque(maxlen=self.context_chain_max_records)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "").strip().lower()
+                content = str(item.get("content") or "").strip()
+                if role not in {"user", "assistant"} or not content:
+                    continue
+                chain.append({"role": role, "content": content})
+            if chain:
+                loaded[scope_id] = chain
+        self.managed_contexts_by_scope = loaded
+
+    def _save_managed_contexts(self) -> None:
+        try:
+            payload = {
+                "scopes": {
+                    scope_id: list(chain)
+                    for scope_id, chain in self.managed_contexts_by_scope.items()
+                    if chain
+                }
+            }
+            self.managed_contexts_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("[myenhance] failed to save managed contexts: %s", exc)
 
     def _get_context_role(self, ctx: Any) -> str:
         if isinstance(ctx, dict):
@@ -1508,6 +1561,38 @@ class MyPlugin(Star):
             len(history_lines),
         )
 
+    def _extract_llm_response_text(self, response: Any) -> str:
+        if response is None:
+            return ""
+        for key in ("completion_text", "text", "content", "message"):
+            value = getattr(response, key, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if isinstance(response, dict):
+            for key in ("completion_text", "text", "content", "message"):
+                value = response.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    @filter.on_llm_response()
+    async def record_llm_raw_response_to_context(self, event: AstrMessageEvent, response=None, *args, **kwargs):
+        scope_id = self._get_event_scope_id(event)
+        if not scope_id:
+            return
+
+        raw_text = self._extract_llm_response_text(response)
+        if not raw_text and hasattr(event, "get_result"):
+            result = event.get_result()
+            if result and getattr(result, "chain", None):
+                raw_text = "".join(
+                    comp.text for comp in result.chain if isinstance(comp, Plain)
+                ).strip()
+        if not raw_text:
+            return
+
+        await self._append_managed_context(scope_id, "assistant", raw_text)
+
     @filter.on_decorating_result()
     async def parse_control_tags_in_decorating_result(self, event: AstrMessageEvent):
         result = event.get_result()
@@ -1540,11 +1625,5 @@ class MyPlugin(Star):
             return
 
         result.chain = parsed_chain.chain
-        scope_id = self._get_event_scope_id(event)
-        if scope_id:
-            assistant_text = re.sub(r"<\s*(?:quote|mention)\b[^>]*>", "", text, flags=re.IGNORECASE)
-            assistant_text = re.sub(r"\s+", " ", assistant_text).strip()
-            if assistant_text:
-                await self._append_managed_context(scope_id, "assistant", assistant_text)
         logger.info("[myenhance] parsed control tags into chain in on_decorating_result")
 
