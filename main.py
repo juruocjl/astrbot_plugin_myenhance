@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.4")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.5")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -575,6 +575,11 @@ class MyPlugin(Star):
         conversation = self._contexts_to_summary_text(contexts)
         if not conversation:
             return None
+        logger.info(
+            "[myenhance] start summarizing contexts: blocks=%d chars=%d",
+            len(contexts),
+            len(conversation),
+        )
 
         provider = self.context.get_using_provider(event.unified_msg_origin)
         if not provider:
@@ -601,16 +606,27 @@ class MyPlugin(Star):
             shortened = self._shorten_memory_summary(text)
             if not shortened:
                 return None
-            return self._build_memory_keyword(shortened), shortened
+            keyword = self._build_memory_keyword(shortened)
+            logger.info(
+                "[myenhance] summarize fallback parsed: keyword_len=%d content_len=%d",
+                len(keyword),
+                len(shortened),
+            )
+            return keyword, shortened
 
         keyword, content = parsed
         shortened = self._shorten_memory_summary(content)
         if not shortened:
             return None
         final_keyword = keyword or self._build_memory_keyword(shortened)
+        logger.info(
+            "[myenhance] summarize parsed json: keyword_len=%d content_len=%d",
+            len(final_keyword),
+            len(shortened),
+        )
         return final_keyword, shortened
 
-    def _shorten_memory_summary(self, summary_text: str, max_chars: int = 120) -> str:
+    def _shorten_memory_summary(self, summary_text: str, max_chars: int = 220) -> str:
         normalized = re.sub(r"\s+", " ", str(summary_text or "").strip())
         if not normalized:
             return ""
@@ -688,6 +704,13 @@ class MyPlugin(Star):
 
         summary_contexts = context_list[:keep_start_idx]
         kept_contexts = context_list[keep_start_idx:]
+        logger.info(
+            "[myenhance] context trimming triggered: total_user=%d keep_user=%d summarize_blocks=%d keep_blocks=%d",
+            len(user_positions),
+            keep_user_count,
+            len(summary_contexts),
+            len(kept_contexts),
+        )
         summary_result = await self._summarize_context_blocks(event, summary_contexts)
         if summary_result and scope_id:
             summary_keyword, summary_text = summary_result
