@@ -1,6 +1,6 @@
 [project]
 name = "astrbot-plugin-myenhance"
-version = "1.8.5"
+version = "1.8.6"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"

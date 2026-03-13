@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.5")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.6")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -626,7 +626,7 @@ class MyPlugin(Star):
         )
         return final_keyword, shortened
 
-    def _shorten_memory_summary(self, summary_text: str, max_chars: int = 220) -> str:
+    def _shorten_memory_summary(self, summary_text: str, max_chars: int = 320) -> str:
         normalized = re.sub(r"\s+", " ", str(summary_text or "").strip())
         if not normalized:
             return ""
