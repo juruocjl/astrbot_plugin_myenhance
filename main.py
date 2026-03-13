@@ -31,7 +31,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.6")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.7")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
@@ -51,6 +51,11 @@ class MyPlugin(Star):
         )
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
+        self.scope_request_locks: dict[str, asyncio.Lock] = {}
+        self.scope_summarizing: dict[str, bool] = defaultdict(bool)
+        self.managed_contexts_by_scope: dict[str, Deque[dict[str, str]]] = defaultdict(
+            lambda: deque(maxlen=self.context_chain_max_records)
+        )
         self.face_desc_map = load_face_desc_map()
         plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         plugin_data_path.mkdir(parents=True, exist_ok=True)
@@ -167,6 +172,12 @@ class MyPlugin(Star):
         except (TypeError, ValueError):
             self.context_user_limit = 12
 
+        raw_context_chain_max_records = self.config.get("context_chain_max_records", 120)
+        try:
+            self.context_chain_max_records = max(10, int(raw_context_chain_max_records))
+        except (TypeError, ValueError):
+            self.context_chain_max_records = 120
+
         raw_context_user_keep_after = self.config.get("context_user_keep_after", 4)
         try:
             keep_after = int(raw_context_user_keep_after)
@@ -235,6 +246,7 @@ class MyPlugin(Star):
             "jargon_total_recall_count": self.jargon_total_recall_count,
             "history_inject_count": self.history_inject_count,
             "context_user_limit": self.context_user_limit,
+            "context_chain_max_records": self.context_chain_max_records,
             "context_user_keep_after": self.context_user_keep_after,
             "memory_recall_count": self.memory_recall_count,
             "memory_max_records": self.memory_max_records,
@@ -255,6 +267,58 @@ class MyPlugin(Star):
             lock = asyncio.Lock()
             self.group_history_locks[group_id] = lock
         return lock
+
+    def _get_scope_request_lock(self, scope_id: str) -> asyncio.Lock:
+        lock = self.scope_request_locks.get(scope_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.scope_request_locks[scope_id] = lock
+        return lock
+
+    def _is_scope_summarizing(self, scope_id: str) -> bool:
+        return bool(self.scope_summarizing.get(scope_id, False))
+
+    async def _append_managed_context(self, scope_id: str, role: str, content: str) -> None:
+        normalized_scope = str(scope_id or "").strip()
+        normalized_role = str(role or "").strip().lower()
+        normalized_content = str(content or "").strip()
+        if not normalized_scope or normalized_role not in {"user", "assistant"} or not normalized_content:
+            return
+
+        async with self._get_group_lock(normalized_scope):
+            self.managed_contexts_by_scope[normalized_scope].append(
+                {"role": normalized_role, "content": normalized_content}
+            )
+
+    async def _replace_managed_contexts(self, scope_id: str, contexts: list[Any]) -> None:
+        normalized_scope = str(scope_id or "").strip()
+        if not normalized_scope:
+            return
+        normalized: list[dict[str, str]] = []
+        for ctx in contexts:
+            role = self._get_context_role(ctx)
+            if role not in {"user", "assistant"}:
+                continue
+            content = ctx.get("content") if isinstance(ctx, dict) else getattr(ctx, "content", None)
+            text = self._extract_context_text(content)
+            if not text:
+                continue
+            normalized.append({"role": role, "content": text})
+
+        async with self._get_group_lock(normalized_scope):
+            chain = deque(maxlen=self.context_chain_max_records)
+            chain.extend(normalized)
+            self.managed_contexts_by_scope[normalized_scope] = chain
+
+    async def _get_managed_contexts(self, scope_id: str) -> list[dict[str, str]]:
+        normalized_scope = str(scope_id or "").strip()
+        if not normalized_scope:
+            return []
+        async with self._get_group_lock(normalized_scope):
+            chain = self.managed_contexts_by_scope.get(normalized_scope)
+            if not chain:
+                return []
+            return [dict(item) for item in chain]
 
     def _compose_mute_payload(
         self,
@@ -1024,6 +1088,11 @@ class MyPlugin(Star):
         if self.active_reply_whitelist and group_id not in self.active_reply_whitelist:
             return False
 
+        scope_id = self._get_event_scope_id(event)
+        if scope_id and self._is_scope_summarizing(scope_id):
+            logger.debug("[myenhance] skip active_reply: scope %s is summarizing", scope_id)
+            return False
+
         text = normalize_message_text(event, self.face_desc_map)
         if not text:
             return False
@@ -1289,6 +1358,10 @@ class MyPlugin(Star):
         if event.get_sender_id() == event.get_self_id():
             return
 
+        scope_id = self._get_event_scope_id(event)
+        if scope_id:
+            await self._append_managed_context(scope_id, "user", self._format_member_message(event))
+
         await self._cache_recent_event(event)
 
         line = self._format_member_message(event)
@@ -1326,13 +1399,28 @@ class MyPlugin(Star):
         req: ProviderRequest,
     ):
         scope_id = self._get_event_scope_id(event)
-        req.contexts = self._remove_injected_memory_context_block(req.contexts)
-        req.contexts = await self._apply_context_memory_management(
-            event,
-            scope_id,
-            req.contexts,
-        )
-        req.contexts = self._inject_recent_memory_context_block(req.contexts, scope_id)
+        request_lock = self._get_scope_request_lock(scope_id) if scope_id else None
+        if request_lock and request_lock.locked():
+            logger.info("[myenhance] waiting previous llm_request to finish summarization for scope %s", scope_id)
+
+        if request_lock:
+            async with request_lock:
+                managed_contexts = await self._get_managed_contexts(scope_id)
+                managed_contexts = self._remove_injected_memory_context_block(managed_contexts)
+                self.scope_summarizing[scope_id] = True
+                try:
+                    managed_contexts = await self._apply_context_memory_management(
+                        event,
+                        scope_id,
+                        managed_contexts,
+                    )
+                finally:
+                    self.scope_summarizing[scope_id] = False
+
+                await self._replace_managed_contexts(scope_id, managed_contexts)
+                req.contexts = self._inject_recent_memory_context_block(managed_contexts, scope_id)
+        else:
+            req.contexts = []
 
         req.system_prompt = (
             f"{req.system_prompt}\n\n{self.reply_system_prompt_cn}"
@@ -1452,5 +1540,11 @@ class MyPlugin(Star):
             return
 
         result.chain = parsed_chain.chain
+        scope_id = self._get_event_scope_id(event)
+        if scope_id:
+            assistant_text = re.sub(r"<\s*(?:quote|mention)\b[^>]*>", "", text, flags=re.IGNORECASE)
+            assistant_text = re.sub(r"\s+", " ", assistant_text).strip()
+            if assistant_text:
+                await self._append_managed_context(scope_id, "assistant", assistant_text)
         logger.info("[myenhance] parsed control tags into chain in on_decorating_result")
 

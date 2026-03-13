@@ -65,6 +65,11 @@
     "type": "int",
     "default": 12
   },
+  "context_chain_max_records": {
+    "description": "插件自维护 context 链的最大条数（user+assistant）",
+    "type": "int",
+    "default": 120
+  },
   "context_user_keep_after": {
     "description": "超出上限后保留最近 Y 个 user 块及其后的内容，其余内容会被总结",
     "type": "int",
