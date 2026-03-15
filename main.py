@@ -54,6 +54,7 @@ class MyPlugin(Star):
         self.image_url_lru: OrderedDict[str, str] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
         self.scope_request_locks: dict[str, asyncio.Lock] = {}
+        self.scope_active_reply_blocks: dict[str, int] = defaultdict(int)
         self.managed_contexts_by_scope: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self.context_chain_max_records)
         )
@@ -282,6 +283,30 @@ class MyPlugin(Star):
     def _is_scope_request_locked(self, scope_id: str) -> bool:
         lock = self.scope_request_locks.get(scope_id)
         return bool(lock and lock.locked())
+
+    async def _mark_active_reply_block_start(self, scope_id: str) -> None:
+        normalized_scope = str(scope_id or "").strip()
+        if not normalized_scope:
+            return
+        async with self._get_group_lock(normalized_scope):
+            self.scope_active_reply_blocks[normalized_scope] += 1
+
+    async def _mark_active_reply_block_end(self, scope_id: str) -> None:
+        normalized_scope = str(scope_id or "").strip()
+        if not normalized_scope:
+            return
+        async with self._get_group_lock(normalized_scope):
+            current = int(self.scope_active_reply_blocks.get(normalized_scope, 0))
+            if current <= 1:
+                self.scope_active_reply_blocks.pop(normalized_scope, None)
+            else:
+                self.scope_active_reply_blocks[normalized_scope] = current - 1
+
+    def _is_active_reply_blocked(self, scope_id: str) -> bool:
+        normalized_scope = str(scope_id or "").strip()
+        if not normalized_scope:
+            return False
+        return int(self.scope_active_reply_blocks.get(normalized_scope, 0)) > 0
 
     def _context_to_dict(self, ctx: Any) -> dict[str, Any] | None:
         if isinstance(ctx, dict):
@@ -1132,6 +1157,9 @@ class MyPlugin(Star):
             return False
 
         scope_id = self._get_event_scope_id(event)
+        if scope_id and self._is_active_reply_blocked(scope_id):
+            logger.debug("[myenhance] skip active_reply: scope %s active-reply block is held", scope_id)
+            return False
         if scope_id and self._is_scope_request_locked(scope_id):
             logger.debug("[myenhance] skip active_reply: scope %s request lock is held", scope_id)
             return False
@@ -1438,6 +1466,7 @@ class MyPlugin(Star):
         req: ProviderRequest,
     ):
         scope_id = self._get_event_scope_id(event)
+        await self._mark_active_reply_block_start(scope_id)
         original_prompt = self._format_member_message(event)
         request_lock = self._get_scope_request_lock(scope_id) if scope_id else None
         if request_lock and request_lock.locked():
@@ -1555,35 +1584,40 @@ class MyPlugin(Star):
 
     @filter.on_decorating_result()
     async def parse_control_tags_in_decorating_result(self, event: AstrMessageEvent):
-        result = event.get_result()
-        if not result or not result.chain:
-            return
-        if any(not isinstance(comp, Plain) for comp in result.chain):
-            return
+        scope_id = self._get_event_scope_id(event)
+        try:
+            result = event.get_result()
+            if not result or not result.chain:
+                return
+            if any(not isinstance(comp, Plain) for comp in result.chain):
+                return
 
-        text = "".join(comp.text for comp in result.chain if isinstance(comp, Plain))
-        text = re.sub(
-            r"<\s*think\s*>.*?<\s*/\s*think\s*>",
-            "",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        text = re.sub(
-            r"</\s*(?:mention|quote)\s*>",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if self.REFUSE_ONLY_RE.match(text):
-            result.chain = []
-            event.stop_event()
-            logger.info("[myenhance] got <refuse/>, suppress outgoing message")
-            return
+            text = "".join(comp.text for comp in result.chain if isinstance(comp, Plain))
+            text = re.sub(
+                r"<\s*think\s*>.*?<\s*/\s*think\s*>",
+                "",
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            text = re.sub(
+                r"</\s*(?:mention|quote)\s*>",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if self.REFUSE_ONLY_RE.match(text):
+                result.chain = []
+                event.stop_event()
+                logger.info("[myenhance] got <refuse/>, suppress outgoing message")
+                return
 
-        parsed_chain = self._parse_control_tags_to_chain(text)
-        if not parsed_chain:
-            return
+            parsed_chain = self._parse_control_tags_to_chain(text)
+            if not parsed_chain:
+                return
 
-        result.chain = parsed_chain.chain
-        logger.info("[myenhance] parsed control tags into chain in on_decorating_result")
+            result.chain = parsed_chain.chain
+            logger.info("[myenhance] parsed control tags into chain in on_decorating_result")
+        finally:
+            if scope_id and self._is_active_reply_blocked(scope_id):
+                await self._mark_active_reply_block_end(scope_id)
 
