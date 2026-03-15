@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, redirect, render_template_string, request
 from werkzeug.serving import make_server
 
 from .utils.hybrid_retrieval import hybrid_search
@@ -31,7 +31,15 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
 
     @app.route("/")
     def index():
-        return render_template_string(html_template)
+        return redirect("/jargon")
+
+    @app.route("/jargon")
+    def jargon_page():
+        return render_template_string(html_template, ui_mode="jargon")
+
+    @app.route("/memory")
+    def memory_page():
+        return render_template_string(html_template, ui_mode="memory")
 
     @app.route("/api/list")
     def api_list():

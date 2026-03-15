@@ -13,7 +13,14 @@
 </head>
 <body>
     <div class="container">
-        <h2 class="mb-4">MyEnhance Jargon + Memory</h2>
+        <h2 class="mb-3">MyEnhance Dashboard</h2>
+        <div class="mb-4 d-flex gap-2">
+            <a class="btn {% if ui_mode == 'jargon' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="/jargon">Jargon 管理</a>
+            <a class="btn {% if ui_mode == 'memory' %}btn-success{% else %}btn-outline-success{% endif %}" href="/memory">Memory 管理</a>
+        </div>
+
+        {% if ui_mode == 'jargon' %}
+        <h4 class="mb-3">Jargon 管理</h4>
 
         <div class="card mb-3">
             <div class="card-body">
@@ -44,12 +51,18 @@
 
         <div class="scope-header"><h5 class="mb-0">Jargon</h5></div>
         <div id="content"><div class="text-muted">Loading...</div></div>
+        {% endif %}
 
+        {% if ui_mode == 'memory' %}
+        <h4 class="mb-3">Memory 管理</h4>
         <div class="scope-header"><h5 class="mb-0">Memory</h5></div>
         <div id="memory-content"><div class="text-muted">Loading...</div></div>
+        {% endif %}
     </div>
 
     <script>
+        const UI_MODE = '{{ ui_mode }}';
+
         function escapeHtml(value = "") {
             return String(value)
                 .replace(/&/g, "&amp;")
@@ -142,9 +155,10 @@
         }
 
         async function loadJargon() {
+            const content = document.getElementById('content');
+            if (!content) return;
             const resp = await fetch('/api/list');
             const data = await resp.json();
-            const content = document.getElementById('content');
             const scopes = data.scopes || {};
             const entries = Object.entries(scopes);
             if (!entries.length) {
@@ -218,6 +232,7 @@
 
         async function loadMemory() {
             const container = document.getElementById('memory-content');
+            if (!container) return;
             const resp = await fetch('/api/memory/list');
             const data = await resp.json();
             const scopes = data.scopes || {};
@@ -308,8 +323,11 @@
             loadMemory();
         }
 
-        loadJargon();
-        loadMemory();
+        if (UI_MODE === 'jargon') {
+            loadJargon();
+        } else if (UI_MODE === 'memory') {
+            loadMemory();
+        }
     </script>
 </body>
 </html>
