@@ -1467,10 +1467,9 @@ class MyPlugin(Star):
                 history_lines, all_history_text = await self._get_recent_history_lines(event)
 
                 # 1. 优先检索当前消息相关的黑话
-                logger.debug(f"[myenhance] retrieving related jargon for current message with query: {event.get_sender_id()} {event.message_str}")
                 current_jargon = await self._get_related_jargon(
                     event,
-                    f"{event.get_sender_id()} {event.message_str}",
+                    original_prompt,
                     limit=self.jargon_current_recall_count,
                 )
 
