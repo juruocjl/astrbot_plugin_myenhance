@@ -615,10 +615,11 @@ class MyPlugin(Star):
                 if not isinstance(item, dict):
                     continue
                 role = str(item.get("role") or "").strip().lower()
-                content = str(item.get("content") or "").strip()
-                if not role or not content:
+                if not role:
                     continue
-                chain.append({"role": role, "content": content})
+                restored = dict(item)
+                restored["role"] = role
+                chain.append(restored)
             if chain:
                 loaded[scope_id] = chain
         self.managed_contexts_by_scope = loaded
