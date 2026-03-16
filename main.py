@@ -1439,7 +1439,11 @@ class MyPlugin(Star):
 
     @filter.llm_tool(name="delete_jargon")
     async def delete_jargon(self, event: AstrMessageEvent, jargon_id: str = "") -> str:
-        """删除某条黑话，若检测到重复则优先清理较简略的内容。"""
+        """删除某条黑话，若检测到重复则优先清理较简略的内容。
+
+        Args:
+            jargon_id(string): 需要删除的黑话 ID。
+        """
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
             return "Error: no valid scope for jargon."
