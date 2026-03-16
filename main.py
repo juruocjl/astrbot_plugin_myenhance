@@ -8,6 +8,7 @@ import random
 import re
 import uuid
 from collections import OrderedDict, defaultdict, deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Deque
 from urllib.parse import urljoin
@@ -32,7 +33,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.16")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.17")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
@@ -929,6 +930,15 @@ class MyPlugin(Star):
             return "summary"
         return normalized[:80]
 
+    def _format_memory_time(self, raw_time: str) -> str:
+        text = str(raw_time or "").strip()
+        if not text:
+            return "unknown"
+        try:
+            return datetime.fromisoformat(text).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return text
+
     async def _store_system_memory_entry(
         self,
         scope_id: str,
@@ -1008,7 +1018,10 @@ class MyPlugin(Star):
             return None
 
         selected = records[-max(1, limit) :]
-        lines = [f"- [{record.id}] {record.content}" for record in selected]
+        lines = [
+            f"- [{record.id}] ({self._format_memory_time(record.created_at)}) {record.content}"
+            for record in selected
+        ]
         return (
             f"{self.MEMORY_CONTEXT_MARKER}\n"
             "以下是最近记忆（按时间从旧到新，供上下文参考）：\n"
@@ -1438,45 +1451,78 @@ class MyPlugin(Star):
         return f"Updated jargon: id={record.id} content={record.content}"
 
     @filter.llm_tool(name="delete_jargon")
-    async def delete_jargon(self, event: AstrMessageEvent, jargon_id: str = "") -> str:
-        """删除某条黑话，若检测到重复则优先清理较简略的内容。
+    async def delete_jargon(
+        self,
+        event: AstrMessageEvent,
+        jargon_ids: list[str] | None = None,
+        keyword: str = "",
+        content: str = "",
+        jargon_id: str = "",
+    ) -> str:
+        """删除一批黑话并新增一条替换黑话。
 
         Args:
-            jargon_id(string): 需要删除的黑话 ID。
+            jargon_ids(list): 需要删除的黑话 ID 列表。
+            keyword(string): 新增黑话的关键词。
+            content(string): 新增黑话内容。
+            jargon_id(string): 兼容旧调用的单个黑话 ID（会并入 jargon_ids）。
         """
         scope_id = self._get_event_scope_id(event)
         if not scope_id:
             return "Error: no valid scope for jargon."
 
-        if jargon_id:
-            records = self.jargon_store.list_jargons(scope_id)
-            record = next((r for r in records if r.id == jargon_id), None)
-            if not record:
-                return f"Error: jargon not found: {jargon_id}."
-            normalized_content = (record.content or "").strip().lower()
+        normalized_ids: list[str] = []
+        for item in jargon_ids or []:
+            value = str(item or "").strip()
+            if value and value not in normalized_ids:
+                normalized_ids.append(value)
+        legacy_id = str(jargon_id or "").strip()
+        if legacy_id and legacy_id not in normalized_ids:
+            normalized_ids.append(legacy_id)
+        if not normalized_ids:
+            return "Error: jargon_ids is empty."
 
-            success = self.jargon_store.delete_jargon(scope_id, jargon_id)
-            if not success:
-                return f"Error: jargon not found: {jargon_id}."
+        normalized_keyword = str(keyword or "").strip()
+        normalized_content = str(content or "").strip()
+        if not normalized_keyword:
+            return "Error: keyword is empty."
+        if not normalized_content:
+            return "Error: content is empty."
 
-            message = [f"Deleted jargon: id={jargon_id}."]
-            if normalized_content:
-                records_after = self.jargon_store.list_jargons(scope_id)
-                duplicates = [
-                    r for r in records_after
-                    if r.content.strip().lower() == normalized_content and r.id != jargon_id
-                ]
-                if duplicates:
-                    duplicates.sort(key=lambda r: len(r.content or ""))
-                    shortest = duplicates[0]
-                    longest = duplicates[-1]
-                    if shortest.id != longest.id and self.jargon_store.delete_jargon(scope_id, shortest.id):
-                        message.append(
-                            f"发现重复黑话，删除内容较简略的 {shortest.id}，保留更详细的 {longest.id}."
-                        )
-            return " ".join(message)
+        deleted_ids: list[str] = []
+        missing_ids: list[str] = []
+        for target_id in normalized_ids:
+            if self.jargon_store.delete_jargon(scope_id, target_id):
+                deleted_ids.append(target_id)
+            else:
+                missing_ids.append(target_id)
 
-        return "Error: jargon_id is empty."
+        if not deleted_ids:
+            return f"Error: jargon not found: {', '.join(missing_ids)}"
+
+        embedding = None
+        provider = self._get_embedding_provider()
+        if provider:
+            try:
+                embedding = await provider.get_embedding(normalized_content)
+            except Exception as exc:
+                logger.warning("[myenhance] failed to get embedding for replacement jargon: %s", exc)
+
+        try:
+            record = self.jargon_store.add_jargon(
+                scope_id,
+                normalized_content,
+                keyword=normalized_keyword,
+                embedding=embedding,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
+
+        missing_suffix = f" Missing: {', '.join(missing_ids)}." if missing_ids else ""
+        return (
+            f"Deleted jargon ids: {', '.join(deleted_ids)}. "
+            f"Added jargon: id={record.id} content={record.content}.{missing_suffix}"
+        )
 
     @filter.llm_tool(name="mute_member")
     async def mute_member(
@@ -1631,7 +1677,10 @@ class MyPlugin(Star):
 
                 histroy_prompt = " 最近历史消息：\n" + "\n\n".join(history_lines)
                 jargon_prompt = "相关黑话：\n" + "\n".join(f"[{record.id}] (关键词：{record.keyword}) {record.content}" for record in jargons)
-                memory_prompt = "相关记忆：\n" + "\n".join(f"[{record.id}] {record.content}" for record in memories)
+                memory_prompt = "相关记忆：\n" + "\n".join(
+                    f"[{record.id}] ({self._format_memory_time(record.created_at)}) {record.content}"
+                    for record in memories
+                )
                 bot_id = self._get_bot_id(event)
                 current_msg_id = getattr(event.message_obj, "message_id", "unknown")
                 role_label = " (admin)" if event.is_admin() else "(member)"
