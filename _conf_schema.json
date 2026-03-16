@@ -75,6 +75,11 @@
     "type": "int",
     "default": 4
   },
+  "context_summary_interval": {
+    "description": "后台定时检查 context 的间隔秒数（达到阈值时会总结旧对话）",
+    "type": "int",
+    "default": 8
+  },
   "jargon_max_records": {
     "description": "每个会话范围最多保存多少条黑话",
     "type": "int",

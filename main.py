@@ -55,9 +55,12 @@ class MyPlugin(Star):
         self.group_history_locks: dict[str, asyncio.Lock] = {}
         self.scope_request_locks: dict[str, asyncio.Lock] = {}
         self.scope_active_reply_blocks: dict[str, int] = defaultdict(int)
+        self.scope_provider_origins: dict[str, str] = {}
         self.managed_contexts_by_scope: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self.context_chain_max_records)
         )
+        self.context_summary_task: asyncio.Task | None = None
+        self.context_summary_stop_event = asyncio.Event()
         self.face_desc_map = load_face_desc_map()
         plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         plugin_data_path.mkdir(parents=True, exist_ok=True)
@@ -88,9 +91,11 @@ class MyPlugin(Star):
         self.stop_flask = None
         if self.web_port > 0:
             self.stop_flask = start_flask_app(self, self.web_port)
+        self._start_context_summary_task_if_possible()
 
     async def terminate(self) -> None:
         self._save_managed_contexts()
+        await self._stop_context_summary_task()
         if self.stop_flask:
             try:
                 self.stop_flask()
@@ -192,6 +197,12 @@ class MyPlugin(Star):
         keep_after = min(keep_after, self.context_user_limit)
         self.context_user_keep_after = keep_after
 
+        raw_context_summary_interval = self.config.get("context_summary_interval", 8)
+        try:
+            self.context_summary_interval = max(1, int(raw_context_summary_interval))
+        except (TypeError, ValueError):
+            self.context_summary_interval = 8
+
         raw_memory_recall_count = self.config.get("memory_recall_count", 3)
         try:
             self.memory_recall_count = max(0, int(raw_memory_recall_count))
@@ -253,6 +264,7 @@ class MyPlugin(Star):
             "context_user_limit": self.context_user_limit,
             "context_chain_max_records": self.context_chain_max_records,
             "context_user_keep_after": self.context_user_keep_after,
+            "context_summary_interval": self.context_summary_interval,
             "memory_recall_count": self.memory_recall_count,
             "memory_max_records": self.memory_max_records,
             "bm25_weight": self.bm25_weight,
@@ -307,6 +319,90 @@ class MyPlugin(Star):
         if not normalized_scope:
             return False
         return int(self.scope_active_reply_blocks.get(normalized_scope, 0)) > 0
+
+    def _start_context_summary_task_if_possible(self) -> None:
+        if self.context_summary_task and not self.context_summary_task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.context_summary_stop_event.clear()
+        self.context_summary_task = asyncio.create_task(self._context_summary_worker())
+
+    async def _stop_context_summary_task(self) -> None:
+        task = self.context_summary_task
+        self.context_summary_stop_event.set()
+        if not task:
+            return
+        if task.done():
+            self.context_summary_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self.context_summary_task = None
+
+    async def _context_summary_worker(self) -> None:
+        logger.info(
+            "[myenhance] context summary worker started (interval=%ss)",
+            self.context_summary_interval,
+        )
+        try:
+            while not self.context_summary_stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self.context_summary_stop_event.wait(),
+                        timeout=float(self.context_summary_interval),
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+                if self.context_summary_stop_event.is_set():
+                    break
+                await self._run_context_summary_cycle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("[myenhance] context summary worker stopped unexpectedly: %s", exc)
+
+    async def _run_context_summary_cycle(self) -> None:
+        if self.context_user_limit <= 0:
+            return
+
+        scope_ids = list(self.managed_contexts_by_scope.keys())
+        if not scope_ids:
+            return
+
+        for scope_id in scope_ids:
+            if not scope_id:
+                continue
+
+            if self._is_active_reply_blocked(scope_id):
+                continue
+
+            await self._mark_active_reply_block_start(scope_id)
+            try:
+                managed_contexts = await self._get_managed_contexts(scope_id)
+                trimmed_count = await self._apply_context_memory_management(
+                    scope_id,
+                    managed_contexts,
+                )
+                if trimmed_count > 0:
+                    async with self._get_group_lock(scope_id):
+                        chain = self.managed_contexts_by_scope.get(scope_id)
+                        if not chain:
+                            continue
+                        remove_count = min(trimmed_count, len(chain))
+                        for _ in range(remove_count):
+                            chain.popleft()
+                        if remove_count > 0:
+                            self._save_managed_contexts()
+            finally:
+                await self._mark_active_reply_block_end(scope_id)
 
     def _context_to_dict(self, ctx: Any) -> dict[str, Any] | None:
         if isinstance(ctx, dict):
@@ -751,7 +847,7 @@ class MyPlugin(Star):
 
     async def _summarize_context_blocks(
         self,
-        event: AstrMessageEvent,
+        scope_id: str,
         contexts: list[Any],
     ) -> tuple[str, str] | None:
         if not contexts or not self.summary_prompt_template:
@@ -766,7 +862,8 @@ class MyPlugin(Star):
             len(conversation),
         )
 
-        provider = self.context.get_using_provider(event.unified_msg_origin)
+        provider_origin = self.scope_provider_origins.get(scope_id) or scope_id
+        provider = self.context.get_using_provider(provider_origin)
         if not provider:
             return None
 
@@ -834,7 +931,6 @@ class MyPlugin(Star):
 
     async def _store_system_memory_entry(
         self,
-        event: AstrMessageEvent,
         scope_id: str,
         summary_keyword: str,
         summary_text: str,
@@ -864,12 +960,11 @@ class MyPlugin(Star):
 
     async def _apply_context_memory_management(
         self,
-        event: AstrMessageEvent,
         scope_id: str,
         contexts: list[Any] | None,
-    ) -> list[Any]:
+    ) -> int:
         if not contexts or self.context_user_limit <= 0:
-            return list(contexts or [])
+            return 0
 
         context_list = list(contexts)
         user_positions: list[int] = []
@@ -878,14 +973,14 @@ class MyPlugin(Star):
                 user_positions.append(idx)
         logger.debug(f"[myenhance] context user positions: {user_positions}")
         if len(user_positions) < self.context_user_limit:
-            return context_list
+            return 0
 
         # 保留最近 N 个 user 块及其后的上下文，而不是从头数第 N 个。
         keep_user_count = min(len(user_positions), max(1, self.context_user_keep_after))
         keep_from_user_idx = len(user_positions) - keep_user_count
         keep_start_idx = user_positions[keep_from_user_idx]
         if keep_start_idx <= 0:
-            return context_list
+            return 0
 
         summary_contexts = context_list[:keep_start_idx]
         kept_contexts = context_list[keep_start_idx:]
@@ -896,16 +991,16 @@ class MyPlugin(Star):
             len(summary_contexts),
             len(kept_contexts),
         )
-        summary_result = await self._summarize_context_blocks(event, summary_contexts)
+        summary_result = await self._summarize_context_blocks(scope_id, summary_contexts)
         if summary_result and scope_id:
             summary_keyword, summary_text = summary_result
-            await self._store_system_memory_entry(event, scope_id, summary_keyword, summary_text)
+            await self._store_system_memory_entry(scope_id, summary_keyword, summary_text)
             logger.info(
                 "[myenhance] summarized %d contexts into system memory for scope %s",
                 len(summary_contexts),
                 scope_id,
             )
-        return kept_contexts
+        return keep_start_idx
 
     def _build_recent_memory_context_block(self, scope_id: str, limit: int = 5) -> str | None:
         records = self.memory_store.list_memories(scope_id)
@@ -1465,7 +1560,10 @@ class MyPlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ):
+        self._start_context_summary_task_if_possible()
         scope_id = self._get_event_scope_id(event)
+        if scope_id:
+            self.scope_provider_origins[scope_id] = event.unified_msg_origin
         await self._mark_active_reply_block_start(scope_id)
         original_prompt = self._format_member_message(event)
         request_lock = self._get_scope_request_lock(scope_id) if scope_id else None
@@ -1479,13 +1577,6 @@ class MyPlugin(Star):
                     await self._append_managed_context(scope_id, item)
 
                 managed_contexts = await self._get_managed_contexts(scope_id)
-                managed_contexts = await self._apply_context_memory_management(
-                    event,
-                    scope_id,
-                    managed_contexts,
-                )
-
-                await self._replace_managed_contexts(scope_id, managed_contexts)
 
                 req.system_prompt = (
                     f"{req.system_prompt}\n\n{self.reply_system_prompt_cn}"
