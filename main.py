@@ -656,13 +656,9 @@ class MyPlugin(Star):
 
         meme_tags = self.meme_manager.get_tags_by_image_id(image_id)
         if meme_tags:
-            tags_text = "|".join(meme_tags)
-            if keyword:
-                return self.image_manager.build_inject_tag(
-                    image_id,
-                    f"tag={tags_text}; keyword={keyword}",
-                )
-            return self.image_manager.build_inject_tag(image_id, f"tag={tags_text}")
+            safe_keyword = re.sub(r"[\r\n,]", " ", keyword).strip()
+            safe_tag = re.sub(r"[\r\n,]", " ", "|".join(meme_tags)).strip()
+            return f"[meme:{image_id},{safe_keyword},{safe_tag}]"
 
         return self.image_manager.build_inject_tag(image_id, keyword)
 
@@ -1560,6 +1556,8 @@ class MyPlugin(Star):
         image_entry = self.image_manager.get_entry(image_id, self.image_url_lru)
         if image_entry is None:
             return f"Error: image_id not found in cache: {image_id}"
+        if not str(image_entry.get("url") or "").strip() and not str(image_entry.get("local_path") or "").strip():
+            return "Error: add_meme only supports image type id."
 
         ok, msg = self.meme_manager.add_meme(image_id, meme_tag, image_entry=image_entry)
         if not ok:

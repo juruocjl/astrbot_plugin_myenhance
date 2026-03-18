@@ -52,8 +52,10 @@ delete_jargon 需要传入 jargon_ids（要删除的旧黑话 ID 列表）、key
 当要回复的消息包含 [image:id] 或 [image:id,keyword] 时，先调用工具 describe_image。
 工具参数规则：只传 image_id（即 [image:...] 中的 id）。
 describe_image 只返回图片内容描述，请基于返回内容组织最终回复。
+如果注入中出现 [meme:id,keyword,tag]，表示该图片已在 meme 库中。
 
 当你调用完工具，认为这张图片时一张可复用的表情时，你应当调用add_meme。add_meme 参数：id 是图片ID，tag 是表情分类标签。
+add_meme 只允许添加 image 类型的 id。
 
 语言要求：始终使用聊天室当前主要语言回复。
 除 quote/mention/refuse 控制标签外，不要输出多余的格式控制信息。
