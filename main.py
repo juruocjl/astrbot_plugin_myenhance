@@ -40,7 +40,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.2")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.3")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
@@ -1455,50 +1455,18 @@ class MyPlugin(Star):
         self,
         event: AstrMessageEvent,
         image_id: str = "",
-        msgid: str = "",
-        image_index: int = 1,
     ) -> str:
         """调用当前聊天模型描述图片内容。
 
         Args:
             image_id(string): 图片 ID（消息中的 [image:id]）。优先使用该参数。
-            msgid(string): 需要描述的消息编号（message_id）。会尝试从该消息中提取图片。
-            image_index(number): 第几张图片，从 1 开始。
 
         Returns:
             string: 图片内容描述文本（仅 content，不返回 keyword）。
         """
         target_image_id = str(image_id or "").strip()
-        target_msg_id = (msgid or "").strip()
-        try:
-            idx = max(1, int(image_index))
-        except (TypeError, ValueError):
-            idx = 1
-        selected_index = idx - 1
-
-        candidate_image_ids: list[str] = []
-        if not target_image_id and target_msg_id:
-            cached_images = await self._get_cached_image_ids_by_msg_id(event, target_msg_id)
-            if cached_images:
-                candidate_image_ids = cached_images
-
-        if not target_image_id and not candidate_image_ids and target_msg_id:
-            candidate_urls = await extract_quoted_message_images(
-                event,
-                reply_component=Reply(id=target_msg_id),
-            )
-            candidate_image_ids = await self._touch_image_ids(candidate_urls)
-
-        if not target_image_id and not candidate_image_ids:
-            candidate_image_ids = await self._touch_image_ids(extract_image_urls(event))
-        if not target_image_id and not candidate_image_ids:
-            return "Error: no image found for describe_image."
-        if not target_image_id and selected_index >= len(candidate_image_ids):
-            return (
-                f"Error: image_index out of range. Found {len(candidate_image_ids)} image(s), but got {idx}."
-            )
         if not target_image_id:
-            target_image_id = candidate_image_ids[selected_index]
+            return "Error: image_id is required for describe_image."
 
         entry = self.image_manager.get_entry(target_image_id, self.image_url_lru)
         if not entry:
