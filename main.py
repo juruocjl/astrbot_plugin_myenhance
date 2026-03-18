@@ -15,6 +15,11 @@ from urllib.parse import urljoin
 
 import httpx
 
+try:
+    from PIL import Image as PILImage
+except Exception:  # pragma: no cover - optional dependency
+    PILImage = None
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType
@@ -35,7 +40,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.1")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.2")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
@@ -1367,6 +1372,49 @@ class MyPlugin(Star):
                 continue
         return None
 
+    def _sample_animated_frames(self, image_id: str, image_entry: dict[str, str], max_frames: int = 4) -> list[str]:
+        if PILImage is None:
+            return []
+
+        local_path = Path(str(image_entry.get("local_path") or "").strip())
+        if not local_path.exists() or not local_path.is_file():
+            return []
+
+        # 仅对常见动图格式进行抽帧。
+        suffix = local_path.suffix.lower()
+        if suffix not in {".gif", ".webp"}:
+            return []
+
+        try:
+            with PILImage.open(local_path) as img:
+                frame_count = int(getattr(img, "n_frames", 1) or 1)
+                if frame_count <= 1:
+                    return []
+
+                sample_dir = local_path.parent / "samples"
+                sample_dir.mkdir(parents=True, exist_ok=True)
+
+                target_count = max(2, min(int(max_frames), frame_count))
+                if target_count == frame_count:
+                    frame_indexes = list(range(frame_count))
+                else:
+                    frame_indexes = sorted({
+                        int(round(i * (frame_count - 1) / (target_count - 1)))
+                        for i in range(target_count)
+                    })
+
+                sampled_files: list[str] = []
+                for seq, frame_index in enumerate(frame_indexes):
+                    img.seek(frame_index)
+                    frame = img.convert("RGB")
+                    sample_path = sample_dir / f"{image_id}_f{seq}_{frame_index}.jpg"
+                    frame.save(sample_path, format="JPEG", quality=85, optimize=True)
+                    sampled_files.append(str(sample_path))
+                return sampled_files
+        except Exception as exc:
+            logger.warning("[myenhance] failed to sample animated image frames: %s", exc)
+            return []
+
     def _get_meme_tags_prompt_block(self) -> str:
         tags = self.meme_manager.list_tags()
         if not tags:
@@ -1460,6 +1508,9 @@ class MyPlugin(Star):
         if not target_image:
             return f"Error: image source missing for image_id: {target_image_id}"
 
+        sample_frames = self._sample_animated_frames(target_image_id, entry)
+        image_inputs = sample_frames if sample_frames else [target_image]
+
         cached_payload = self._get_cached_image_payload(target_image_id)
         if cached_payload:
             logger.debug("[myenhance] describe_image hit id cache: %s", target_image_id)
@@ -1485,13 +1536,14 @@ class MyPlugin(Star):
             "请严格返回 JSON："
             '{"keyword":"关键词","content":"图片描述"}。'
             "其中 keyword 需为简短关键词，content 为简洁客观描述。"
+            "若输入为动图抽帧，请综合所有帧描述整体内容。"
         )
 
         try:
             resp = await provider.text_chat(
                 prompt=describe_prompt,
                 session_id=uuid.uuid4().hex,
-                image_urls=[target_image],
+                image_urls=image_inputs,
                 persist=False,
             )
         except Exception as exc:
