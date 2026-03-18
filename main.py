@@ -35,7 +35,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.0")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.1")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
@@ -648,6 +648,17 @@ class MyPlugin(Star):
         keyword = ""
         if entry:
             keyword = str(entry.get("keyword") or "").strip()
+
+        meme_tags = self.meme_manager.get_tags_by_image_id(image_id)
+        if meme_tags:
+            tags_text = "|".join(meme_tags)
+            if keyword:
+                return self.image_manager.build_inject_tag(
+                    image_id,
+                    f"tag={tags_text}; keyword={keyword}",
+                )
+            return self.image_manager.build_inject_tag(image_id, f"tag={tags_text}")
+
         return self.image_manager.build_inject_tag(image_id, keyword)
 
     async def _inject_image_ids_to_text(self, event: AstrMessageEvent, text: str) -> str:
@@ -1879,10 +1890,6 @@ class MyPlugin(Star):
                     "\n\n<MEMORY>\n"
                     f"{memory_prompt if memories else '暂无相关记忆。'}\n"
                     "</MEMORY>\n\n"
-                    "<MEME_TAGS>\n"
-                    f"{meme_tags_prompt}\n"
-                    "若需发送该类表情，可输出 <meme tag=\"标签\"/>。\n"
-                    "</MEME_TAGS>\n\n"
                     "<JARGON>\n"
                     "以下是相关黑话："
                     f"{jargon_prompt}"
@@ -1890,6 +1897,12 @@ class MyPlugin(Star):
                     f"{self.jargon_prompt_rules}\n"
                     "=====\n"
                     "</JARGON>"
+                    "<MEME_TAGS>\n"
+                    f"{meme_tags_prompt}\n"
+                    "若需发送该类表情，可输出 <meme tag=\"标签\"/>。\n"
+                    "=====\n"
+                    "如果你发现新的图片可以作为表情包，你可以使用工具add_meme把它加入表情库。\n"
+                    "</MEME_TAGS>\n\n"
                 )
 
                 logger.info(

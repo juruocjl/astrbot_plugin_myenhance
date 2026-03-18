@@ -65,6 +65,16 @@ class MemeManager:
     def list_tags(self) -> list[str]:
         return sorted(self.memes_by_tag.keys())
 
+    def get_tags_by_image_id(self, image_id: str) -> list[str]:
+        normalized_id = str(image_id or "").strip()
+        if not normalized_id:
+            return []
+        tags: list[str] = []
+        for tag, ids in self.memes_by_tag.items():
+            if normalized_id in ids:
+                tags.append(tag)
+        return sorted(tags)
+
     def _normalize_tag(self, tag: str) -> str:
         return str(tag or "").strip().lower()
 
