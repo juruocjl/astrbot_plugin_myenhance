@@ -233,7 +233,11 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
             image_ids = list(plugin_instance.meme_manager.memes_by_tag.get(tag) or [])
             tag_items = []
             for image_id in image_ids:
-                image_entry = plugin_instance.image_manager.get_entry(image_id, plugin_instance.image_url_lru) or {}
+                image_entry = (
+                    plugin_instance.image_manager.get_entry(image_id, plugin_instance.image_url_lru)
+                    or plugin_instance.meme_manager.get_image_entry(image_id)
+                    or {}
+                )
                 tag_items.append(
                     {
                         "id": image_id,
@@ -254,9 +258,10 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
         tag = str(data.get("tag") or "").strip()
         if not image_id or not tag:
             return jsonify({"success": False, "msg": "id and tag are required"})
-        if plugin_instance.image_manager.get_entry(image_id, plugin_instance.image_url_lru) is None:
+        image_entry = plugin_instance.image_manager.get_entry(image_id, plugin_instance.image_url_lru)
+        if image_entry is None:
             return jsonify({"success": False, "msg": f"image_id not found: {image_id}"})
-        ok, msg = plugin_instance.meme_manager.add_meme(image_id, tag)
+        ok, msg = plugin_instance.meme_manager.add_meme(image_id, tag, image_entry=image_entry)
         return jsonify({"success": ok, "msg": msg})
 
     @app.route("/api/meme/delete", methods=["POST"])

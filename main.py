@@ -40,7 +40,7 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.3")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.4")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
@@ -1354,6 +1354,8 @@ class MyPlugin(Star):
         if not key:
             return None
         entry = self.image_manager.get_entry(key, self.image_url_lru)
+        if entry is None:
+            entry = self.meme_manager.get_image_entry(key)
         if not entry:
             return None
 
@@ -1503,7 +1505,7 @@ class MyPlugin(Star):
             f"{self.describe_image_ask}\n\n"
             "请严格返回 JSON："
             '{"keyword":"关键词","content":"图片描述"}。'
-            "其中 keyword 需为简短关键词，content 为简洁客观描述。"
+            "其中 keyword 需为简短关键词，但是需要包含关键表达内容，content 为简洁客观描述。"
             "若输入为动图抽帧，请综合所有帧描述整体内容。"
         )
 
@@ -1555,10 +1557,11 @@ class MyPlugin(Star):
         if not meme_tag:
             return "Error: tag is empty."
 
-        if self.image_manager.get_entry(image_id, self.image_url_lru) is None:
+        image_entry = self.image_manager.get_entry(image_id, self.image_url_lru)
+        if image_entry is None:
             return f"Error: image_id not found in cache: {image_id}"
 
-        ok, msg = self.meme_manager.add_meme(image_id, meme_tag)
+        ok, msg = self.meme_manager.add_meme(image_id, meme_tag, image_entry=image_entry)
         if not ok:
             return f"Error: {msg}"
         return f"add_meme success: id={image_id} tag={meme_tag} status={msg}"
