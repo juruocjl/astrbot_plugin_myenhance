@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
-from flask import Flask, jsonify, redirect, render_template_string, request
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file
 from werkzeug.serving import make_server
 
 from .utils.hybrid_retrieval import hybrid_search
@@ -40,6 +40,10 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
     @app.route("/memory")
     def memory_page():
         return render_template_string(html_template, ui_mode="memory")
+
+    @app.route("/image")
+    def image_page():
+        return render_template_string(html_template, ui_mode="image")
 
     @app.route("/api/list")
     def api_list():
@@ -166,6 +170,47 @@ def start_flask_app(plugin_instance: "MyPlugin", port: int):
         memory_id = str(data.get("id") or "").strip()
         success = plugin_instance.memory_store.delete_memory(scope, memory_id)
         return jsonify({"success": success, "msg": "Deleted" if success else "Delete failed"})
+
+    @app.route("/api/image/list")
+    def api_image_list():
+        records = []
+        for image_id, raw_entry in reversed(plugin_instance.image_url_lru.items()):
+            if not isinstance(raw_entry, dict):
+                continue
+            records.append(
+                {
+                    "id": str(image_id or ""),
+                    "url": str(raw_entry.get("url") or ""),
+                    "keyword": str(raw_entry.get("keyword") or ""),
+                    "content": str(raw_entry.get("content") or ""),
+                    "has_image": bool(raw_entry.get("local_path")),
+                    "has_thumb": bool(raw_entry.get("thumb_path")),
+                }
+            )
+        return jsonify({"count": len(records), "records": records})
+
+    @app.route("/api/image/file/<image_id>")
+    def api_image_file(image_id: str):
+        key = str(image_id or "").strip()
+        if not key:
+            abort(404)
+        raw_entry = plugin_instance.image_url_lru.get(key)
+        if not isinstance(raw_entry, dict):
+            abort(404)
+
+        use_thumb = str(request.args.get("thumb") or "").strip() in {"1", "true", "True"}
+        path_key = "thumb_path" if use_thumb else "local_path"
+        file_path = Path(str(raw_entry.get(path_key) or "").strip())
+        if file_path.exists() and file_path.is_file():
+            return send_file(file_path)
+
+        # 小图不存在时回退原图。
+        if use_thumb:
+            fallback = Path(str(raw_entry.get("local_path") or "").strip())
+            if fallback.exists() and fallback.is_file():
+                return send_file(fallback)
+
+        abort(404)
 
     server = make_server("0.0.0.0", port, app)
     plugin_instance._flask_server = server

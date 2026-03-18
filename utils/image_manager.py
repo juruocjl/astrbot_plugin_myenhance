@@ -8,6 +8,11 @@ from typing import Any
 
 import httpx
 
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - Pillow unavailable fallback
+    Image = None
+
 
 class ImageManager:
     """管理图片 ID 生成与基于 ID 的 LRU 缓存。"""
@@ -106,6 +111,9 @@ class ImageManager:
         if not image_file.exists():
             image_file.write_bytes(image_bytes)
         entry["local_path"] = str(image_file)
+        thumb_path = self._build_thumbnail(image_file, image_id)
+        if thumb_path:
+            entry["thumb_path"] = str(thumb_path)
 
         image_lru[image_id] = entry
         image_lru.move_to_end(image_id)
@@ -157,6 +165,7 @@ class ImageManager:
             keyword = re.sub(r"\s+", " ", str(raw_value.get("keyword") or "").strip())
             content = re.sub(r"\s+", " ", str(raw_value.get("content") or "").strip())
             local_path = str(raw_value.get("local_path") or "").strip()
+            thumb_path = str(raw_value.get("thumb_path") or "").strip()
             if content and not keyword:
                 keyword = self.build_keyword(content)
             return {
@@ -164,6 +173,7 @@ class ImageManager:
                 "keyword": keyword,
                 "content": content,
                 "local_path": local_path,
+                "thumb_path": thumb_path,
             }
 
         legacy_content = re.sub(r"\s+", " ", str(raw_value or "").strip())
@@ -172,6 +182,7 @@ class ImageManager:
             "keyword": self.build_keyword(legacy_content),
             "content": legacy_content,
             "local_path": "",
+            "thumb_path": "",
         }
 
     def _find_image_id_by_url(self, image_source: str, image_lru: OrderedDict[str, Any]) -> str:
@@ -240,6 +251,23 @@ class ImageManager:
             if source.endswith(ext):
                 return ".jpg" if ext == ".jpeg" else ext
         return ".img"
+
+    def _build_thumbnail(self, image_file: Path, image_id: str, size: tuple[int, int] = (256, 256)) -> Path | None:
+        if Image is None:
+            return None
+        try:
+            thumb_file = self.image_store_dir / f"{image_id}_thumb.jpg"
+            if thumb_file.exists():
+                return thumb_file
+
+            with Image.open(image_file) as img:
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                img.thumbnail(size)
+                img.save(thumb_file, format="JPEG", quality=85, optimize=True)
+            return thumb_file
+        except Exception:
+            return None
 
     def _trim(self, image_lru: OrderedDict[str, Any], max_size: int) -> None:
         limit = max(1, int(max_size))

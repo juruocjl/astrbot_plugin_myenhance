@@ -9,12 +9,19 @@ from .image_manager import ImageManager
 
 class CacheManager:
     """管理持久化缓存状态。"""
-    def __init__(self, cache_file: Path, max_history: int, event_cache_size: int, image_url_cache_size: int):
+    def __init__(
+        self,
+        cache_file: Path,
+        max_history: int,
+        event_cache_size: int,
+        image_url_cache_size: int,
+        image_manager: ImageManager | None = None,
+    ):
         self.cache_file = cache_file
         self.max_history = max_history
         self.event_cache_size = event_cache_size
         self.image_url_cache_size = image_url_cache_size
-        self.image_manager = ImageManager()
+        self.image_manager = image_manager or ImageManager(self.cache_file.parent / "images")
 
     def load_cache_state(self, group_histories, recent_events, image_url_lru: OrderedDict[str, Any]):
         if not self.cache_file.exists():
@@ -64,6 +71,8 @@ class CacheManager:
                             url = str(raw_value.get("url") or "").strip()
                             keyword = str(raw_value.get("keyword") or "").strip()
                             content = str(raw_value.get("content") or "").strip()
+                            local_path = str(raw_value.get("local_path") or "").strip()
+                            thumb_path = str(raw_value.get("thumb_path") or "").strip()
 
                             if not image_id and url:
                                 image_id = self.image_manager.build_legacy_image_id(url)
@@ -76,6 +85,8 @@ class CacheManager:
                                 "url": url,
                                 "keyword": keyword,
                                 "content": content,
+                                "local_path": local_path,
+                                "thumb_path": thumb_path,
                             }
                             continue
 
@@ -90,6 +101,8 @@ class CacheManager:
                             "url": legacy_url,
                             "keyword": self.image_manager.build_keyword(legacy_content),
                             "content": legacy_content,
+                            "local_path": "",
+                            "thumb_path": "",
                         }
                 while len(image_url_lru) > self.image_url_cache_size:
                     image_url_lru.popitem(last=False)

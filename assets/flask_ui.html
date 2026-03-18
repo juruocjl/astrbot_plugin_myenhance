@@ -17,6 +17,7 @@
         <div class="mb-4 d-flex gap-2">
             <a class="btn {% if ui_mode == 'jargon' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="/jargon">Jargon 管理</a>
             <a class="btn {% if ui_mode == 'memory' %}btn-success{% else %}btn-outline-success{% endif %}" href="/memory">Memory 管理</a>
+            <a class="btn {% if ui_mode == 'image' %}btn-warning{% else %}btn-outline-warning{% endif %}" href="/image">Image 管理</a>
         </div>
 
         {% if ui_mode == 'jargon' %}
@@ -57,6 +58,15 @@
         <h4 class="mb-3">Memory 管理</h4>
         <div class="scope-header"><h5 class="mb-0">Memory</h5></div>
         <div id="memory-content"><div class="text-muted">Loading...</div></div>
+        {% endif %}
+
+        {% if ui_mode == 'image' %}
+        <h4 class="mb-3">Image 管理</h4>
+        <div class="scope-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Images</h5>
+            <button class="btn btn-sm btn-outline-warning" onclick="loadImages()">Refresh</button>
+        </div>
+        <div id="image-content"><div class="text-muted">Loading...</div></div>
         {% endif %}
     </div>
 
@@ -323,10 +333,50 @@
             loadMemory();
         }
 
+        async function loadImages() {
+            const container = document.getElementById('image-content');
+            if (!container) return;
+            const resp = await fetch('/api/image/list');
+            const data = await resp.json();
+            const records = Array.isArray(data.records) ? data.records : [];
+            if (!records.length) {
+                container.innerHTML = '<div class="alert alert-info">No image data</div>';
+                return;
+            }
+
+            let html = `<div class="mb-2 text-muted">共 ${Number(data.count || records.length)} 条图片缓存</div>`;
+            records.forEach((record) => {
+                const imageId = escapeAttr(record.id || '');
+                const thumbUrl = `/api/image/file/${encodeURIComponent(record.id || '')}?thumb=1`;
+                const fullUrl = `/api/image/file/${encodeURIComponent(record.id || '')}`;
+                html += `
+                    <div class="card item-card">
+                        <div class="card-body">
+                            <div class="row g-3">
+                                <div class="col-md-3">
+                                    <a href="${fullUrl}" target="_blank" rel="noopener noreferrer">
+                                        <img src="${thumbUrl}" alt="${imageId}" class="img-fluid rounded border" loading="lazy" onerror="this.style.display='none'">
+                                    </a>
+                                </div>
+                                <div class="col-md-9">
+                                    <p class="mb-1"><strong>ID:</strong> ${escapeHtml(record.id || '')}</p>
+                                    <p class="mb-1"><strong>Keyword:</strong> ${escapeHtml(record.keyword || '')}</p>
+                                    <p class="mb-1"><strong>Content:</strong> ${escapeHtml(record.content || '')}</p>
+                                    <p class="mb-0 text-muted">URL: ${escapeHtml(record.url || '')}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+            });
+            container.innerHTML = html;
+        }
+
         if (UI_MODE === 'jargon') {
             loadJargon();
         } else if (UI_MODE === 'memory') {
             loadMemory();
+        } else if (UI_MODE === 'image') {
+            loadImages();
         }
     </script>
 </body>

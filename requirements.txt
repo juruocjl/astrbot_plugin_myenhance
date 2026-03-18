@@ -3,3 +3,4 @@ flask
 httpx
 rank_bm25
 pypinyin
+Pillow
