@@ -18,7 +18,7 @@ import httpx
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType
-from astrbot.api.message_components import At, Plain, Reply
+from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -34,12 +34,13 @@ from .utils.message_utils import extract_image_urls, format_time, get_event_time
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.19")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.20")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
+    IMAGE_RE = re.compile(r'<image\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     REFUSE_ONLY_RE = re.compile(r'^\s*<refuse\s*/>\s*$')
 
     def __init__(self, context: Context, config: dict | None = None):
@@ -1291,17 +1292,26 @@ class MyPlugin(Star):
         if quote_id:
             chain.append(Reply(id=quote_id))
 
+        tag_re = re.compile(
+            r'<mention\s+id="([^"]+)"\s*/?>|<image\s+id="([^"]+)"\s*/?>',
+            re.IGNORECASE,
+        )
         cursor = 0
-        for mention_match in self.MENTION_RE.finditer(body):
+        for tag_match in tag_re.finditer(body):
             touched = True
-            if mention_match.start() > cursor:
-                plain = body[cursor : mention_match.start()]
+            if tag_match.start() > cursor:
+                plain = body[cursor : tag_match.start()]
                 if plain:
                     chain.append(Plain(plain))
-            mention_id = mention_match.group(1).strip()
+            mention_id = str(tag_match.group(1) or "").strip()
+            image_id = str(tag_match.group(2) or "").strip()
             if mention_id:
                 chain.append(At(qq=mention_id, name=""))
-            cursor = mention_match.end()
+            elif image_id:
+                image_comp = self._build_image_component_by_id(image_id)
+                if image_comp is not None:
+                    chain.append(image_comp)
+            cursor = tag_match.end()
 
         if cursor < len(body):
             tail = body[cursor:]
@@ -1311,6 +1321,29 @@ class MyPlugin(Star):
         if not touched:
             return None
         return MessageChain(chain=chain)
+
+    def _build_image_component_by_id(self, image_id: str) -> Image | None:
+        key = str(image_id or "").strip()
+        if not key:
+            return None
+        entry = self.image_manager.get_entry(key, self.image_url_lru)
+        if not entry:
+            return None
+
+        local_path = str(entry.get("local_path") or "").strip()
+        url = str(entry.get("url") or "").strip()
+
+        image_source = local_path if local_path else url
+        if not image_source:
+            return None
+
+        # 兼容不同 astrbot 版本的 Image 构造参数。
+        for kwargs in ({"file": image_source}, {"url": image_source}):
+            try:
+                return Image(**kwargs)
+            except Exception:
+                continue
+        return None
 
     def _should_active_reply(self, event: AstrMessageEvent) -> bool:
         if not self.active_reply_enable:
@@ -1847,7 +1880,7 @@ class MyPlugin(Star):
                 flags=re.DOTALL | re.IGNORECASE,
             )
             text = re.sub(
-                r"</\s*(?:mention|quote)\s*>",
+                r"</\s*(?:mention|quote|image)\s*>",
                 "",
                 text,
                 flags=re.IGNORECASE,
