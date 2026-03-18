@@ -27,13 +27,14 @@ from astrbot.core.utils.quoted_message_parser import extract_quoted_message_imag
 from .utils.cache_manager import CacheManager
 from .utils.face_map import load_face_desc_map
 from .utils.hybrid_retrieval import hybrid_search
+from .utils.image_manager import ImageManager
 from .utils.jargon_store import JargonRecord, JargonStore
 from .utils.memory_store import MemoryRecord, MemoryStore
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.17")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.18")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
@@ -52,7 +53,7 @@ class MyPlugin(Star):
         self.recent_events: dict[str, Deque[tuple[str, list[str]]]] = defaultdict(
             lambda: deque(maxlen=self.event_cache_size)
         )
-        self.image_url_lru: OrderedDict[str, str] = OrderedDict()
+        self.image_url_lru: OrderedDict[str, dict[str, str]] = OrderedDict()
         self.group_history_locks: dict[str, asyncio.Lock] = {}
         self.scope_request_locks: dict[str, asyncio.Lock] = {}
         self.scope_active_reply_blocks: dict[str, int] = defaultdict(int)
@@ -70,6 +71,7 @@ class MyPlugin(Star):
         self.memory_store_file = plugin_data_path / ".myenhance_memories.json"
         self.managed_contexts_file = plugin_data_path / ".myenhance_contexts.json"
         self.temp_summary_prompt_file = plugin_data_path / ".myenhance_summary_prompt.tmp.txt"
+        self.image_manager = ImageManager(plugin_data_path / "images")
         self.cache_manager = CacheManager(
             self.cache_state_file,
             self.max_history,
@@ -600,7 +602,7 @@ class MyPlugin(Star):
         if not scope_id or not msg_id:
             return
 
-        image_urls = extract_image_urls(event)
+        image_ids = await self._touch_image_ids(extract_image_urls(event))
         async with self._get_group_lock(scope_id):
             cached = self.recent_events[scope_id]
             deduped = [
@@ -610,38 +612,85 @@ class MyPlugin(Star):
             ]
             cached.clear()
             cached.extend(deduped)
-            cached.append((msg_id, image_urls))
+            cached.append((msg_id, image_ids))
         self.cache_manager.save_cache_state(
             self.group_histories,
             self.recent_events,
             self.image_url_lru,
         )
 
-    def _get_cached_image_desc(self, image_url: str) -> str | None:
-        key = str(image_url or "").strip()
-        if not key:
-            return None
-        value = self.image_url_lru.get(key)
-        if value is None:
-            return None
-        self.image_url_lru.move_to_end(key)
-        return value
+    async def _touch_image_ids(self, image_urls: list[str]) -> list[str]:
+        image_ids: list[str] = []
+        for image_url in image_urls:
+            image_id = await self.image_manager.ensure_image(
+                image_url,
+                self.image_url_lru,
+                self.image_url_cache_size,
+            )
+            if image_id:
+                image_ids.append(image_id)
+        if image_ids:
+            self.cache_manager.save_cache_state(
+                self.group_histories,
+                self.recent_events,
+                self.image_url_lru,
+            )
+        return image_ids
 
-    def _set_cached_image_desc(self, image_url: str, description: str) -> None:
-        key = str(image_url or "").strip()
-        if not key:
+    def _get_image_inject_tag(self, image_id: str) -> str:
+        entry = self.image_manager.get_entry(image_id, self.image_url_lru)
+        keyword = ""
+        if entry:
+            keyword = str(entry.get("keyword") or "").strip()
+        return self.image_manager.build_inject_tag(image_id, keyword)
+
+    async def _inject_image_ids_to_text(self, event: AstrMessageEvent, text: str) -> str:
+        normalized = str(text or "")
+        if "[image]" not in normalized:
+            return normalized
+
+        image_ids = await self._touch_image_ids(extract_image_urls(event))
+        if not image_ids:
+            return normalized
+
+        replaced = normalized
+        for image_id in image_ids:
+            if "[image]" not in replaced:
+                break
+            replaced = replaced.replace("[image]", self._get_image_inject_tag(image_id), 1)
+        return replaced
+
+    def _get_cached_image_payload(self, image_id: str) -> tuple[str, str] | None:
+        entry = self.image_manager.get_entry(image_id, self.image_url_lru)
+        if not entry:
+            return None
+
+        content = re.sub(r"\s+", " ", str(entry.get("content") or "").strip())
+        if not content:
+            return None
+
+        keyword = re.sub(r"\s+", " ", str(entry.get("keyword") or "").strip())
+        if not keyword:
+            keyword = self.image_manager.build_keyword(content)
+        return keyword, content
+
+    def _set_cached_image_payload(self, image_id: str, keyword: str, content: str) -> None:
+        entry = self.image_manager.set_description(
+            image_id,
+            self.image_url_lru,
+            keyword,
+            content,
+            self.image_url_cache_size,
+        )
+        if not entry:
             return
-        self.image_url_lru[key] = description
-        self.image_url_lru.move_to_end(key)
-        while len(self.image_url_lru) > self.image_url_cache_size:
-            self.image_url_lru.popitem(last=False)
         self.cache_manager.save_cache_state(
             self.group_histories,
             self.recent_events,
             self.image_url_lru,
         )
 
-    async def _get_cached_image_urls_by_msg_id(
+    async def _get_cached_image_ids_by_msg_id(
         self,
         event: AstrMessageEvent,
         msg_id: str,
@@ -697,6 +746,20 @@ class MyPlugin(Star):
 
     def _load_summary_prompt_template(self) -> str:
         return self._load_text_asset("prompt.txt", "")
+
+    async def _format_member_message_async(self, event: AstrMessageEvent) -> str:
+        poke_text = self._format_poke_message(event)
+        if poke_text:
+            return poke_text
+
+        nickname = event.get_sender_name() or "unknown"
+        sender_id = event.get_sender_id() or "unknown"
+        role = "admin" if event.is_admin() else "member"
+        timestamp = getattr(event.message_obj, "timestamp", None)
+        msg_id = getattr(event.message_obj, "message_id", None) or "unknown"
+        text = normalize_message_text(event, self.face_desc_map)
+        text = await self._inject_image_ids_to_text(event, text)
+        return f"[{nickname}/{sender_id}/{format_time(timestamp)}] ({role})#msg{msg_id}\n{text}"
 
     def _load_jargon_prompt_rules(self) -> str:
         fallback = "请根据已注入黑话谨慎调用工具并回复消息。"
@@ -1281,15 +1344,21 @@ class MyPlugin(Star):
     async def describe_image_with_llm(
         self,
         event: AstrMessageEvent,
+        image_id: str = "",
         msgid: str = "",
         image_index: int = 1,
     ) -> str:
         """调用当前聊天模型描述图片内容。
 
         Args:
+            image_id(string): 图片 ID（消息中的 [image:id]）。优先使用该参数。
             msgid(string): 需要描述的消息编号（message_id）。会尝试从该消息中提取图片。
             image_index(number): 第几张图片，从 1 开始。
+
+        Returns:
+            string: 图片内容描述文本（仅 content，不返回 keyword）。
         """
+        target_image_id = str(image_id or "").strip()
         target_msg_id = (msgid or "").strip()
         try:
             idx = max(1, int(image_index))
@@ -1297,32 +1366,43 @@ class MyPlugin(Star):
             idx = 1
         selected_index = idx - 1
 
-        candidate_images: list[str] = []
-        if target_msg_id:
-            cached_images = await self._get_cached_image_urls_by_msg_id(event, target_msg_id)
+        candidate_image_ids: list[str] = []
+        if not target_image_id and target_msg_id:
+            cached_images = await self._get_cached_image_ids_by_msg_id(event, target_msg_id)
             if cached_images:
-                candidate_images = cached_images
+                candidate_image_ids = cached_images
 
-        if not candidate_images and target_msg_id:
-            candidate_images = await extract_quoted_message_images(
+        if not target_image_id and not candidate_image_ids and target_msg_id:
+            candidate_urls = await extract_quoted_message_images(
                 event,
                 reply_component=Reply(id=target_msg_id),
             )
+            candidate_image_ids = await self._touch_image_ids(candidate_urls)
 
-        if not candidate_images:
-            candidate_images = extract_image_urls(event)
-        if not candidate_images:
+        if not target_image_id and not candidate_image_ids:
+            candidate_image_ids = await self._touch_image_ids(extract_image_urls(event))
+        if not target_image_id and not candidate_image_ids:
             return "Error: no image found for describe_image."
-        if selected_index >= len(candidate_images):
+        if not target_image_id and selected_index >= len(candidate_image_ids):
             return (
-                f"Error: image_index out of range. Found {len(candidate_images)} image(s), but got {idx}."
+                f"Error: image_index out of range. Found {len(candidate_image_ids)} image(s), but got {idx}."
             )
+        if not target_image_id:
+            target_image_id = candidate_image_ids[selected_index]
 
-        target_image = candidate_images[selected_index]
-        cached_desc = self._get_cached_image_desc(target_image)
-        if cached_desc:
-            logger.debug("[myenhance] describe_image hit url cache")
-            return cached_desc
+        entry = self.image_manager.get_entry(target_image_id, self.image_url_lru)
+        if not entry:
+            return f"Error: image_id not found in cache: {target_image_id}"
+
+        target_image = str(entry.get("url") or "").strip()
+        if not target_image:
+            return f"Error: image source missing for image_id: {target_image_id}"
+
+        cached_payload = self._get_cached_image_payload(target_image_id)
+        if cached_payload:
+            logger.debug("[myenhance] describe_image hit id cache: %s", target_image_id)
+            _, content = cached_payload
+            return content
 
         provider = None
         if self.describe_image_provider_id:
@@ -1338,9 +1418,16 @@ class MyPlugin(Star):
         if not provider:
             return "Error: no provider found for current session."
 
+        describe_prompt = (
+            f"{self.describe_image_ask}\n\n"
+            "请严格返回 JSON："
+            '{"keyword":"关键词","content":"图片描述"}。'
+            "其中 keyword 需为简短关键词，content 为简洁客观描述。"
+        )
+
         try:
             resp = await provider.text_chat(
-                prompt=self.describe_image_ask,
+                prompt=describe_prompt,
                 session_id=uuid.uuid4().hex,
                 image_urls=[target_image],
                 persist=False,
@@ -1353,8 +1440,23 @@ class MyPlugin(Star):
         if not text:
             return "Error: image description result is empty."
 
-        self._set_cached_image_desc(target_image, text)
-        return text
+        parsed = self._extract_summary_keyword_content(text)
+        if parsed is None:
+            content = re.sub(r"\s+", " ", text).strip()
+            if not content:
+                return "Error: image description result is invalid."
+            keyword = self.image_manager.build_keyword(content)
+        else:
+            keyword, content = parsed
+            keyword = re.sub(r"\s+", " ", str(keyword or "").strip())
+            content = re.sub(r"\s+", " ", str(content or "").strip())
+            if not content:
+                return "Error: image description result is invalid."
+            if not keyword:
+                keyword = self.image_manager.build_keyword(content)
+
+        self._set_cached_image_payload(target_image_id, keyword, content)
+        return content
 
     @filter.llm_tool(name="add_jargon")
     async def add_jargon(self, event: AstrMessageEvent, content: str = "", keyword: str = "") -> str:
@@ -1576,7 +1678,7 @@ class MyPlugin(Star):
 
         await self._cache_recent_event(event)
 
-        line = self._format_member_message(event)
+        line = await self._format_member_message_async(event)
         event_ts = get_event_timestamp(event)
         msg_id = str(getattr(event.message_obj, "message_id", "") or "unknown")
         await self._record_line(group_id, event_ts, msg_id, line)
@@ -1615,7 +1717,7 @@ class MyPlugin(Star):
         if scope_id:
             self.scope_provider_origins[scope_id] = event.unified_msg_origin
         await self._mark_active_reply_block_start(scope_id)
-        original_prompt = self._format_member_message(event)
+        original_prompt = await self._format_member_message_async(event)
         request_lock = self._get_scope_request_lock(scope_id) if scope_id else None
         if request_lock and request_lock.locked():
             logger.info("[myenhance] waiting previous llm_request to finish summarization for scope %s", scope_id)

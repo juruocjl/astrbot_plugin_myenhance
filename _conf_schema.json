@@ -41,7 +41,7 @@
     "default": "请客观描述这张图片中的主要内容，简洁一些。"
   },
   "image_url_cache_size": {
-    "description": "图片 URL 的 LRU 缓存容量（保留最近多少张图片的描述结果）",
+    "description": "图片 ID 的 LRU 缓存容量（保留最近多少张图片及其描述）",
     "type": "int",
     "default": 120
   },
