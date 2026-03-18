@@ -30,17 +30,19 @@ from .utils.hybrid_retrieval import hybrid_search
 from .utils.image_manager import ImageManager
 from .utils.jargon_store import JargonRecord, JargonStore
 from .utils.memory_store import MemoryRecord, MemoryStore
+from .utils.meme_manager import MemeManager
 from .utils.message_utils import extract_image_urls, format_time, get_event_timestamp, normalize_message_text
 from .flask_ui import start_flask_app
 
 
-@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.8.20")
+@register("myenhance", "cjlqwq", "记录群消息并注入到 LLM 请求", "1.9.0")
 class MyPlugin(Star):
     MEMORY_CONTEXT_MARKER = "[MYENHANCE_MEMORY_CONTEXT]"
     HISTORY_CONTEXT_MARKER = "[MYENHANCE_HISTORY_CONTEXT]"
     QUOTE_HEAD_RE = re.compile(r'<quote\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     MENTION_RE = re.compile(r'<mention\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
     IMAGE_RE = re.compile(r'<image\s+id="([^"]+)"\s*/?>', re.IGNORECASE)
+    MEME_RE = re.compile(r'<meme\s+tag="([^"]+)"\s*/?>', re.IGNORECASE)
     REFUSE_ONLY_RE = re.compile(r'^\s*<refuse\s*/>\s*$')
 
     def __init__(self, context: Context, config: dict | None = None):
@@ -70,6 +72,7 @@ class MyPlugin(Star):
         self.cache_state_file = plugin_data_path / ".myenhance_cache_state.json"
         self.jargon_store_file = plugin_data_path / ".myenhance_jargons.json"
         self.memory_store_file = plugin_data_path / ".myenhance_memories.json"
+        self.meme_store_file = plugin_data_path / ".myenhance_memes.json"
         self.managed_contexts_file = plugin_data_path / ".myenhance_contexts.json"
         self.temp_summary_prompt_file = plugin_data_path / ".myenhance_summary_prompt.tmp.txt"
         self.image_manager = ImageManager(plugin_data_path / "images")
@@ -87,6 +90,7 @@ class MyPlugin(Star):
         )
         self.jargon_store = JargonStore(self.jargon_store_file, self.jargon_max_records)
         self.memory_store = MemoryStore(self.memory_store_file, self.memory_max_records)
+        self.meme_manager = MemeManager(self.meme_store_file)
         self._load_managed_contexts()
         self.summary_prompt_template = self._load_summary_prompt_template()
         self.jargon_prompt_rules = self._load_jargon_prompt_rules()
@@ -1293,7 +1297,7 @@ class MyPlugin(Star):
             chain.append(Reply(id=quote_id))
 
         tag_re = re.compile(
-            r'<mention\s+id="([^"]+)"\s*/?>|<image\s+id="([^"]+)"\s*/?>',
+            r'<mention\s+id="([^"]+)"\s*/?>|<image\s+id="([^"]+)"\s*/?>|<meme\s+tag="([^"]+)"\s*/?>',
             re.IGNORECASE,
         )
         cursor = 0
@@ -1305,12 +1309,19 @@ class MyPlugin(Star):
                     chain.append(Plain(plain))
             mention_id = str(tag_match.group(1) or "").strip()
             image_id = str(tag_match.group(2) or "").strip()
+            meme_tag = str(tag_match.group(3) or "").strip()
             if mention_id:
                 chain.append(At(qq=mention_id, name=""))
             elif image_id:
                 image_comp = self._build_image_component_by_id(image_id)
                 if image_comp is not None:
                     chain.append(image_comp)
+            elif meme_tag:
+                meme_id = self.meme_manager.get_random_meme_id(meme_tag)
+                if meme_id:
+                    image_comp = self._build_image_component_by_id(meme_id)
+                    if image_comp is not None:
+                        chain.append(image_comp)
             cursor = tag_match.end()
 
         if cursor < len(body):
@@ -1344,6 +1355,12 @@ class MyPlugin(Star):
             except Exception:
                 continue
         return None
+
+    def _get_meme_tags_prompt_block(self) -> str:
+        tags = self.meme_manager.list_tags()
+        if not tags:
+            return "暂无可用 meme tag。"
+        return "可用 meme tag：" + "、".join(tags)
 
     def _should_active_reply(self, event: AstrMessageEvent) -> bool:
         if not self.active_reply_enable:
@@ -1491,6 +1508,29 @@ class MyPlugin(Star):
 
         self._set_cached_image_payload(target_image_id, keyword, content)
         return content
+
+    @filter.llm_tool(name="add_meme")
+    async def add_meme(self, event: AstrMessageEvent, id: str = "", tag: str = "") -> str:
+        """把图片加入 meme 库，供 <meme tag="..."/> 随机发送。
+
+        Args:
+            id(string): 图片 ID（即 [image:id] 里的 id）。
+            tag(string): meme 标签。
+        """
+        image_id = str(id or "").strip()
+        meme_tag = str(tag or "").strip()
+        if not image_id:
+            return "Error: id is empty."
+        if not meme_tag:
+            return "Error: tag is empty."
+
+        if self.image_manager.get_entry(image_id, self.image_url_lru) is None:
+            return f"Error: image_id not found in cache: {image_id}"
+
+        ok, msg = self.meme_manager.add_meme(image_id, meme_tag)
+        if not ok:
+            return f"Error: {msg}"
+        return f"add_meme success: id={image_id} tag={meme_tag} status={msg}"
 
     @filter.llm_tool(name="add_jargon")
     async def add_jargon(self, event: AstrMessageEvent, content: str = "", keyword: str = "") -> str:
@@ -1817,6 +1857,7 @@ class MyPlugin(Star):
                     f"[{record.id}] ({self._format_memory_time(record.created_at)}) {record.content}"
                     for record in memories
                 )
+                meme_tags_prompt = self._get_meme_tags_prompt_block()
                 bot_id = self._get_bot_id(event)
                 current_msg_id = getattr(event.message_obj, "message_id", "unknown")
                 role_label = " (admin)" if event.is_admin() else "(member)"
@@ -1838,6 +1879,10 @@ class MyPlugin(Star):
                     "\n\n<MEMORY>\n"
                     f"{memory_prompt if memories else '暂无相关记忆。'}\n"
                     "</MEMORY>\n\n"
+                    "<MEME_TAGS>\n"
+                    f"{meme_tags_prompt}\n"
+                    "若需发送该类表情，可输出 <meme tag=\"标签\"/>。\n"
+                    "</MEME_TAGS>\n\n"
                     "<JARGON>\n"
                     "以下是相关黑话："
                     f"{jargon_prompt}"
@@ -1880,7 +1925,7 @@ class MyPlugin(Star):
                 flags=re.DOTALL | re.IGNORECASE,
             )
             text = re.sub(
-                r"</\s*(?:mention|quote|image)\s*>",
+                r"</\s*(?:mention|quote|image|meme)\s*>",
                 "",
                 text,
                 flags=re.IGNORECASE,

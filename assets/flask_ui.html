@@ -18,6 +18,7 @@
             <a class="btn {% if ui_mode == 'jargon' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="/jargon">Jargon 管理</a>
             <a class="btn {% if ui_mode == 'memory' %}btn-success{% else %}btn-outline-success{% endif %}" href="/memory">Memory 管理</a>
             <a class="btn {% if ui_mode == 'image' %}btn-warning{% else %}btn-outline-warning{% endif %}" href="/image">Image 管理</a>
+            <a class="btn {% if ui_mode == 'meme' %}btn-danger{% else %}btn-outline-danger{% endif %}" href="/meme">Meme 管理</a>
         </div>
 
         {% if ui_mode == 'jargon' %}
@@ -67,6 +68,18 @@
             <button class="btn btn-sm btn-outline-warning" onclick="loadImages()">Refresh</button>
         </div>
         <div id="image-content"><div class="text-muted">Loading...</div></div>
+        {% endif %}
+
+        {% if ui_mode == 'meme' %}
+        <h4 class="mb-3">Meme 管理</h4>
+        <div class="scope-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Memes</h5>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-danger" onclick="addMeme()">Add Meme</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="loadMemes()">Refresh</button>
+            </div>
+        </div>
+        <div id="meme-content"><div class="text-muted">Loading...</div></div>
         {% endif %}
     </div>
 
@@ -371,12 +384,91 @@
             container.innerHTML = html;
         }
 
+        async function loadMemes() {
+            const container = document.getElementById('meme-content');
+            if (!container) return;
+            const resp = await fetch('/api/meme/list');
+            const data = await resp.json();
+            const tags = data.tags || {};
+            const entries = Object.entries(tags);
+            if (!entries.length) {
+                container.innerHTML = '<div class="alert alert-info">No meme data</div>';
+                return;
+            }
+
+            let html = '';
+            for (const [tag, items] of entries) {
+                html += `<div class="scope-header"><h6 class="mb-0">Tag: ${escapeHtml(tag)} <span class="badge bg-secondary">${items.length}</span></h6></div>`;
+                items.forEach((item) => {
+                    const idAttr = escapeAttr(item.id || '');
+                    const tagAttr = escapeAttr(tag || '');
+                    const thumbUrl = `/api/image/file/${encodeURIComponent(item.id || '')}?thumb=1`;
+                    const fullUrl = `/api/image/file/${encodeURIComponent(item.id || '')}`;
+                    html += `
+                        <div class="card item-card">
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-md-3">
+                                        <a href="${fullUrl}" target="_blank" rel="noopener noreferrer">
+                                            <img src="${thumbUrl}" alt="${idAttr}" class="img-fluid rounded border" loading="lazy" onerror="this.style.display='none'">
+                                        </a>
+                                    </div>
+                                    <div class="col-md-9">
+                                        <div class="d-flex justify-content-between">
+                                            <p class="mb-1"><strong>ID:</strong> ${escapeHtml(item.id || '')}</p>
+                                            <button class="btn btn-sm btn-outline-danger" data-id="${idAttr}" data-tag="${tagAttr}" onclick="deleteMeme(this)">Delete</button>
+                                        </div>
+                                        <p class="mb-1"><strong>Keyword:</strong> ${escapeHtml(item.keyword || '')}</p>
+                                        <p class="mb-1"><strong>Content:</strong> ${escapeHtml(item.content || '')}</p>
+                                        <p class="mb-0 text-muted">URL: ${escapeHtml(item.url || '')}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>`;
+                });
+            }
+            container.innerHTML = html;
+        }
+
+        async function addMeme() {
+            const id = prompt('Image ID:', '');
+            if (id === null) return;
+            const tag = prompt('Meme tag:', '');
+            if (tag === null) return;
+            if (!id.trim() || !tag.trim()) return alert('id and tag are required');
+            const resp = await fetch('/api/meme/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: id.trim(), tag: tag.trim()})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadMemes();
+        }
+
+        async function deleteMeme(button) {
+            const id = button?.dataset?.id;
+            const tag = button?.dataset?.tag;
+            if (!id || !tag) return alert('Missing target');
+            if (!confirm(`Delete meme id=${id} from tag=${tag}?`)) return;
+            const resp = await fetch('/api/meme/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id, tag})
+            });
+            const data = await resp.json();
+            alert(data.msg || 'Done');
+            loadMemes();
+        }
+
         if (UI_MODE === 'jargon') {
             loadJargon();
         } else if (UI_MODE === 'memory') {
             loadMemory();
         } else if (UI_MODE === 'image') {
             loadImages();
+        } else if (UI_MODE === 'meme') {
+            loadMemes();
         }
     </script>
 </body>
